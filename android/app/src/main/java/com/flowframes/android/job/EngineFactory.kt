@@ -69,12 +69,12 @@ object EngineFactory {
         return when (kind) {
             // Two calls in flight keep the GPU busy while the other one copies frames in and out.
             EngineKind.NCNN_GPU -> Choice(
-                kind, if (settings.workers > 0) settings.workers else 2, 2,
+                kind, if (settings.workerCount > 0) settings.workerCount else 2, 2,
                 cpuWorkers = if (settings.cpuAssist) settings.cpuAssistWorkers.coerceIn(1, 4) else 0,
                 cpuThreads = settings.cpuAssistThreads.coerceIn(1, 8)
             )
             else -> {
-                val workers = (if (settings.workers > 0) settings.workers else InferencePool.defaultWorkers())
+                val workers = (if (settings.workerCount > 0) settings.workerCount else InferencePool.defaultWorkers())
                     .coerceAtMost(totalThreads)
                 Choice(kind, workers, (totalThreads / workers).coerceAtLeast(1))
             }
@@ -96,7 +96,7 @@ object EngineFactory {
             var choice = plan(kind, settings)
             // Above 1440p each GPU session holds several hundred MB of Vulkan buffers and one
             // session already saturates the GPU, so a second one only costs memory.
-            if (kind == EngineKind.NCNN_GPU && settings.workers <= 0 && width.toLong() * height > 2560L * 1440L &&
+            if (kind == EngineKind.NCNN_GPU && settings.workerCount <= 0 && width.toLong() * height > 2560L * 1440L &&
                 choice.workers > 1
             ) {
                 choice = choice.copy(workers = 1)

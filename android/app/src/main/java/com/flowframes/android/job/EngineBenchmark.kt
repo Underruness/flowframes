@@ -165,19 +165,24 @@ object EngineBenchmark {
             configs += Config("GPU 4.9 ×1", EngineKind.NCNN_GPU, 1, 0)
             configs += Config("GPU 4.9 ×2", EngineKind.NCNN_GPU, 2, 0, rounds = 4)
             configs += Config("GPU 4.9 ×3", EngineKind.NCNN_GPU, 3, 0, rounds = 4)
+            configs += Config("GPU 4.6 ×1", EngineKind.NCNN_GPU, 1, 0, model = NcnnModel.V4_6)
             configs += Config("GPU 4.6 ×2", EngineKind.NCNN_GPU, 2, 0, model = NcnnModel.V4_6, rounds = 4)
+        }
+        // Simple view: GPU only (the CPU configurations are in the advanced view).
+        if (gpus > 0 && settings.advanced) {
             // Hybrid: CPU workers pull phases from the same queue as the GPU ones.
             configs += Config("GPU ×2 + CPU 1×4T", EngineKind.NCNN_GPU, 2, 0, cpuWorkers = 1, cpuThreads = 4, rounds = 8)
             configs += Config("GPU ×2 + CPU 1×6T", EngineKind.NCNN_GPU, 2, 0, cpuWorkers = 1, cpuThreads = 6, rounds = 8)
             configs += Config("GPU ×2 + CPU 2×3T", EngineKind.NCNN_GPU, 2, 0, cpuWorkers = 2, cpuThreads = 3, rounds = 8)
         }
-        if (NcnnRifeEngine.isAvailable) {
+        if (NcnnRifeEngine.isAvailable && (settings.advanced || gpus == 0)) {
             configs += Config("CPU ncnn 4.9 $autoWorkers × ${perWorker}T", EngineKind.NCNN_CPU, autoWorkers, perWorker)
         }
         if (gpus > 0) {
             // Last, and behind a timeout: fp16 math hung this benchmark on a Snapdragon 8 Elite.
             configs += Config("GPU 4.9 fp16 math ×2", EngineKind.NCNN_GPU, 2, 0, fp16 = true, rounds = 4)
             configs += Config("GPU 4.9 fp16 math + coopmat ×2", EngineKind.NCNN_GPU, 2, 0, fp16 = true, coop = true, rounds = 4)
+            configs += Config("GPU 4.6 fp16 math + coopmat ×2", EngineKind.NCNN_GPU, 2, 0, model = NcnnModel.V4_6, fp16 = true, coop = true, rounds = 4)
         }
 
         report("Benchmark: ${width}x$height canvas (${String.format(Locale.US, "%.2f", megapixels)} MPx), RIFE fast model")

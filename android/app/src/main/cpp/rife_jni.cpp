@@ -164,6 +164,11 @@ Java_com_flowframes_android_core_NcnnRifeEngine_nativeShaderCacheStats(JNIEnv* e
     return env->NewStringUTF(flowframes::shaderCacheStats().c_str());
 }
 
+JNIEXPORT jint JNI_OnLoad(JavaVM*, void*) {
+    flowframes::pinOpenMpRuntime();
+    return JNI_VERSION_1_6;
+}
+
 JNIEXPORT void JNICALL
 Java_com_flowframes_android_core_NcnnRifeEngine_nativeInstallCrashHandler(JNIEnv* env, jclass, jstring path) {
     std::string p = jstr(env, path);

@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <condition_variable>
 #include <mutex>
+#include <thread>
 
 #include "cpu.h"
 #include "gpu.h"
@@ -66,6 +68,7 @@ std::string RifeCore::deviceName() const {
 int RifeCore::load(const RifeConfig& config, std::string& error) {
     cfg = config;
     if (cfg.padding <= 0) cfg.padding = 32;
+    pinOpenMpRuntime();
 
     vkdev = nullptr;
     if (cfg.gpuId >= 0) {
@@ -284,6 +287,39 @@ int RifeCore::interpolate(const float* frame0, const float* frame1, int width, i
         }
     }
     return 0;
+}
+
+} // namespace flowframes
+
+namespace flowframes {
+
+// See crash_handler.cpp (ffOpenMpEnv): one OpenMP root thread for the life of the process.
+void pinOpenMpRuntime() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        std::mutex m;
+        std::condition_variable cv;
+        bool ready = false;
+        std::thread([&] {
+            // ncnn's fp16 -> fp32 conversion is the parallel region that aborted: run it once.
+            unsigned short half[64] = {0};
+            ncnn::Mat warm = ncnn::Mat::from_float16(half, 64);
+            (void)warm;
+            {
+                // Notified under the lock: the waiter (and m / cv) cannot go away before.
+                std::lock_guard<std::mutex> lk(m);
+                ready = true;
+                cv.notify_all();
+            }
+            // Never returns: keeps libomp initialised.
+            std::mutex forever;
+            std::unique_lock<std::mutex> lk(forever);
+            std::condition_variable never;
+            never.wait(lk, [] { return false; });
+        }).detach();
+        std::unique_lock<std::mutex> lk(m);
+        cv.wait(lk, [&] { return ready; });
+    });
 }
 
 } // namespace flowframes

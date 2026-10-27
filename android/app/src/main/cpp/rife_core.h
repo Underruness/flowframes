@@ -69,6 +69,9 @@ private:
 // ncnn's GPU instance is process-wide; it is created on first use and destroyed at unload.
 void ensureGpuInstance();
 
+/** Starts the process-lifetime OpenMP root thread (once); see crash_handler.cpp. */
+void pinOpenMpRuntime();
+
 } // namespace flowframes
 
 #endif

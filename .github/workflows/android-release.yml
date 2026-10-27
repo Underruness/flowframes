@@ -26,11 +26,25 @@ jobs:
           yes | $SDKM --licenses > /dev/null || true
           $SDKM "ndk;30.0.16248370" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0" > /dev/null
           echo "sdk.dir=$ANDROID_HOME" > local.properties
+      - name: Release signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > release.jks
+            printf 'storeFile=../release.jks\nstorePassword=%s\nkeyAlias=flowframes\nkeyPassword=%s\n' \
+              "$KEYSTORE_PASSWORD" "$KEYSTORE_PASSWORD" > keystore.properties
+          else
+            echo "No release key secret: the APK is signed with the debug key"
+          fi
       - name: Build release APK
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon assembleRelease
           cp app/build/outputs/apk/release/app-release.apk FlowFrames-Android.apk
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          $BT/apksigner verify --verbose --print-certs FlowFrames-Android.apk | head -8
       - uses: actions/upload-artifact@v4
         with:
           name: FlowFrames-Android-apk
@@ -42,4 +56,4 @@ jobs:
           files: android/FlowFrames-Android.apk
           prerelease: true
           name: FlowFrames Android ${{ github.ref_name }}
-          body: "APK arm64 : RIFE sur le GPU via ncnn + Vulkan, repli automatique sur CPU. Signé avec une clé de debug : désinstaller l'ancienne version si l'installation est refusée."
+          body: "APK arm64 : RIFE sur le GPU via ncnn + Vulkan, repli automatique sur CPU. Signé (v1 + v2 + v3) avec la clé de release FlowFrames : inutile de le re-signer. Désinstaller une fois l'ancienne version si l'installation est refusée (clé différente)."

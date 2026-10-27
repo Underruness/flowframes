@@ -34,16 +34,16 @@ data class Settings(
     /** FAST = RIFE without ensemble (about twice as fast), HIGH = ensemble for better quality. */
     val quality: AiQuality = AiQuality.FAST,
     /** Long side cap for interpolation/encoding; 0 keeps the source resolution. */
-    val maxLongSide: Int = 1280,
+    val maxLongSide: Int = 0,
     val keepAudio: Boolean = true,
     val dedupe: Boolean = false,
     val dedupeThreshold: Double = 0.0025,
     val fixSceneChanges: Boolean = true,
     val sceneThreshold: Double = 0.35,
     val loop: Boolean = false,
-    val codec: OutputCodec = OutputCodec.H264,
+    val codec: OutputCodec = OutputCodec.HEVC,
     /** 0 = small file, 1 = balanced, 2 = high bitrate. */
-    val bitratePreset: Int = 1,
+    val bitratePreset: Int = 2,
     val namePattern: String = "{name}_{factor}x_{fps}fps",
     /** 0 disables the output FPS limit. */
     val maxOutputFps: Double = 0.0,
@@ -59,14 +59,15 @@ data class Settings(
     /** 0 = automatic. */
     val threads: Int = 0,
     /**
-     * Inferences computed at the same time. One inference cannot fill eight cores, so several run
-     * in parallel: 0 = automatic (see [com.flowframes.android.core.InferencePool]).
+     * Inferences computed at the same time: [WORKERS_AUTO] = automatic (2 on the GPU, see
+     * [com.flowframes.android.core.InferencePool] on the CPU), 1..4 = that many, [WORKERS_OFF] = no
+     * overlap at all (one inference, and the next pair only starts once the previous one is encoded).
      */
-    val workers: Int = 0,
+    val workers: Int = 1,
     val outputTreeUri: String? = null,
     /** Runtime; AUTO picks the GPU when the phone's Vulkan driver passes the start-up self-test. */
-    val engine: EngineKind = EngineKind.AUTO,
-    val ncnnModel: NcnnModel = NcnnModel.V4_9,
+    val engine: EngineKind = EngineKind.NCNN_GPU,
+    val ncnnModel: NcnnModel = NcnnModel.V4_6,
     /**
      * ncnn fp16 arithmetic. Off by default: on a Snapdragon 8 Elite it failed (benchmark stuck), the
      * suspect being ncnn's Adreno cooperative-matrix kernels, now disabled separately ([coopMatrix]).
@@ -82,8 +83,21 @@ data class Settings(
     val cpuAssist: Boolean = false,
     /** CPU workers in hybrid mode, and the threads each one gets. */
     val cpuAssistWorkers: Int = 1,
-    val cpuAssistThreads: Int = 4
+    val cpuAssistThreads: Int = 4,
+    /** Advanced view: CPU / ONNX options, detailed RAM and temperatures. Off = GPU basics only. */
+    val advanced: Boolean = false
 ) {
+    /** "Off": strictly one pair at a time, nothing overlaps. */
+    val sequential: Boolean get() = workers == WORKERS_OFF
+
+    /** Inference sessions to build; 0 = automatic. */
+    val workerCount: Int get() = if (workers >= 1) workers else if (workers == WORKERS_OFF) 1 else 0
+
+    companion object {
+        const val WORKERS_AUTO = -1
+        const val WORKERS_OFF = 0
+    }
+
     fun planOptions(): com.flowframes.android.core.InterpPlan.Options = com.flowframes.android.core.InterpPlan.Options(
         factor = factor,
         loop = loop,
@@ -97,6 +111,10 @@ data class Settings(
 
 /** Persists [Settings] in SharedPreferences and exposes them as a StateFlow for Compose. */
 class SettingsStore(context: Context) {
+
+    private companion object {
+        const val DEFAULTS_VERSION = 2
+    }
 
     private val prefs = context.applicationContext.getSharedPreferences("flowframes_settings", Context.MODE_PRIVATE)
     private val _state = MutableStateFlow(load())
@@ -115,6 +133,19 @@ class SettingsStore(context: Context) {
 
     private fun load(): Settings {
         val d = Settings()
+        // 1.6.3 changed the defaults (source resolution, GPU, RIFE 4.6, 1 inference, HEVC, high
+        // bitrate): apply them once over what older versions saved, keep everything else.
+        if (prefs.getInt("defaultsVersion", 0) < DEFAULTS_VERSION && prefs.all.isNotEmpty()) {
+            prefs.edit()
+                .putInt("maxLongSide", d.maxLongSide)
+                .putString("engine", d.engine.name)
+                .putString("ncnnModel", d.ncnnModel.name)
+                .putInt("parallelInferences", d.workers)
+                .putString("codec", d.codec.name)
+                .putInt("bitratePreset", d.bitratePreset)
+                .putInt("defaultsVersion", DEFAULTS_VERSION)
+                .apply()
+        }
         return Settings(
             factor = prefs.getInt("factor", d.factor).coerceIn(1, 32),
             targetFps = prefs.getFloat("targetFps", d.targetFps.toFloat()).toDouble().coerceIn(0.0, 480.0),
@@ -136,7 +167,8 @@ class SettingsStore(context: Context) {
             useXnnpack = prefs.getBoolean("useXnnpack", d.useXnnpack),
             parallelOps = prefs.getBoolean("parallelOps", d.parallelOps),
             threads = prefs.getInt("threads", d.threads).coerceIn(0, 16),
-            workers = prefs.getInt("workers", d.workers).coerceIn(0, 6),
+            // New key: "workers" stored 0 for automatic; 0 now means "off".
+            workers = prefs.getInt("parallelInferences", d.workers).coerceIn(-1, 6),
             outputTreeUri = prefs.getString("outputTreeUri", d.outputTreeUri),
             engine = runCatching { EngineKind.valueOf(prefs.getString("engine", d.engine.name)!!) }
                 .getOrDefault(d.engine),
@@ -147,7 +179,8 @@ class SettingsStore(context: Context) {
             coopMatrix = prefs.getBoolean("coopMatrix", d.coopMatrix),
             cpuAssist = prefs.getBoolean("cpuAssist", d.cpuAssist),
             cpuAssistWorkers = prefs.getInt("cpuAssistWorkers", d.cpuAssistWorkers),
-            cpuAssistThreads = prefs.getInt("cpuAssistThreads", d.cpuAssistThreads)
+            cpuAssistThreads = prefs.getInt("cpuAssistThreads", d.cpuAssistThreads),
+            advanced = prefs.getBoolean("advancedView", d.advanced)
         )
     }
 
@@ -171,7 +204,7 @@ class SettingsStore(context: Context) {
             .putBoolean("useXnnpack", s.useXnnpack)
             .putBoolean("parallelOps", s.parallelOps)
             .putInt("threads", s.threads)
-            .putInt("workers", s.workers)
+            .putInt("parallelInferences", s.workers)
             .putString("outputTreeUri", s.outputTreeUri)
             .putString("engine", s.engine.name)
             .putString("ncnnModel", s.ncnnModel.name)
@@ -180,6 +213,8 @@ class SettingsStore(context: Context) {
             .putBoolean("cpuAssist", s.cpuAssist)
             .putInt("cpuAssistWorkers", s.cpuAssistWorkers)
             .putInt("cpuAssistThreads", s.cpuAssistThreads)
+            .putBoolean("advancedView", s.advanced)
+            .putInt("defaultsVersion", DEFAULTS_VERSION)
             .apply()
     }
 }

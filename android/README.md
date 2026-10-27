@@ -534,6 +534,28 @@ Mesures de la 1.5.1 sur Adreno 840, canevas de 1920x1088, en ms par inférence :
   limite (150 s, 300 s en fp16 + coopmat) au-delà de laquelle le GPU est abandonné pour la session
   au lieu de bloquer le travail.
 
+### Version 1.6.3 — vraie cause du crash OpenMP, vue simple, APK signé
+
+- **Crash du benchmark (cause réelle).** libomp est lié en statique ; dans ce cas il s'arrête
+  complètement quand le dernier thread qui l'a utilisé se termine, puis se ré-initialise au
+  prochain usage. Chaque configuration du benchmark (et chaque construction GPU d'un travail)
+  tourne sur un nouveau thread : la 2e configuration ré-initialisait un runtime à moitié démonté
+  et s'arrêtait sur une assertion (`__kmp_create_affinity_none_places`). Un thread créé au
+  chargement de la bibliothèque entre une fois dans OpenMP et vit aussi longtemps que l'appli :
+  OpenMP n'est initialisé qu'une seule fois.
+- **APK signé** avec une clé de release (v2 + v3) dans la CI : plus besoin de le re-signer. Les
+  bibliothèques natives sont extraites à l'installation, ce qui évite l'erreur
+  `libonnxruntime4j_jni.so not found` d'un APK re-signé par un autre outil.
+- **Vue avancée** (Réglages → Affichage). Désactivée par défaut : seuls les réglages de fps, de
+  résolution, du GPU et de la vidéo restent ; la RAM affiche celle du téléphone et la température
+  celle de la batterie. Activée : options CPU / ONNX, détail de la RAM, CPU / GPU / NPU.
+- **Nouveaux réglages par défaut** (appliqués une fois aux réglages existants) : résolution
+  source, moteur GPU, RIFE 4.6, 1 inférence parallèle, HEVC (H.265), débit élevé.
+- **Inférences parallèles « Off »** : une paire à la fois, rien ne se chevauche (la paire suivante
+  n'est lue qu'une fois la précédente encodée), pour mesurer le gain du recouvrement.
+- **Benchmark** en vue simple : configurations GPU seulement (plus RIFE 4.6 ×1 et 4.6 fp16 +
+  coopmat), la référence ONNX reste pour le contrôle de qualité.
+
 ## Limites connues
 
 * Sortie **MP4 uniquement** (H.264 ou HEVC), pas de GIF/PNG/MKV.

@@ -214,7 +214,7 @@ class MainActivity : ComponentActivity() {
                                     s.copy(
                                         // The GPU winner keeps "automatic": the job re-checks Vulkan at
                                         // every start and falls back to the CPU on a broken driver.
-                                        engine = if (gpu) EngineKind.AUTO else best.engine,
+                                        engine = if (gpu) EngineKind.NCNN_GPU else best.engine,
                                         ncnnModel = best.ncnnModel,
                                         fp16 = best.fp16,
                                         coopMatrix = best.coopMatrix,
@@ -223,7 +223,7 @@ class MainActivity : ComponentActivity() {
                                         cpuAssistThreads = if (best.cpuWorkers > 0) best.cpuThreads else s.cpuAssistThreads,
                                         // 0 keeps "automatic", so a later CPU change still adapts.
                                         threads = if (gpu || best.totalThreads == RifeEngine.defaultThreads()) 0 else best.totalThreads,
-                                        workers = if (gpu && best.workers == 2) 0 else best.workers,
+                                        workers = best.workers,
                                         useXnnpack = best.useXnnpack,
                                         parallelOps = best.parallelOps,
                                         useNnapi = false

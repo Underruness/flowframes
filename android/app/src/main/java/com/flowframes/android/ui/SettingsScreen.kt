@@ -85,6 +85,17 @@ fun SettingsScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
+            Section("Display") {
+                SwitchRow(
+                    title = "Advanced view",
+                    description = "Shows the CPU and ONNX Runtime engine options, the detailed RAM split and every " +
+                        "temperature (CPU, GPU, NPU). Off: only the frame rate, resolution, GPU and output settings, " +
+                        "phone RAM and battery temperature.",
+                    checked = settings.advanced,
+                    onCheckedChange = { v -> onChange { s -> s.copy(advanced = v) } }
+                )
+            }
+
             Section("Interpolation") {
                 Text("Output rate", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 val targetMode = settings.targetFps > 0.0
@@ -183,7 +194,8 @@ fun SettingsScreen(
                 )
             }
 
-            Section("AI engine") {
+            Section(if (settings.advanced) "AI engine" else "GPU") {
+                if (settings.advanced) {
                 Text("Runtime", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(EngineKind.AUTO to "Auto", EngineKind.NCNN_GPU to "GPU").forEach { (k, label) ->
@@ -208,6 +220,9 @@ fun SettingsScreen(
                         "self-test at the job's resolution, and falls back to the CPU if the driver fails it. " +
                         "The old ONNX Runtime CPU engine stays available for comparison."
                 )
+                } else if (settings.engine != EngineKind.NCNN_GPU && settings.engine != EngineKind.AUTO) {
+                    Caption("The engine is set to ${settings.engine.label} (advanced view).")
+                }
 
                 Text("ncnn model", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -219,7 +234,7 @@ fun SettingsScreen(
                         )
                     }
                 }
-                Caption("RIFE 4.9 is the same model as the ONNX engine. 4.6 is about 25% lighter, with slightly different results.")
+                Caption("RIFE 4.6 is about 20% faster on the GPU; 4.9 gives slightly different (often cleaner) results.")
 
                 SwitchRow(
                     title = "fp16 arithmetic (ncnn, experimental)",
@@ -236,6 +251,9 @@ fun SettingsScreen(
                     checked = settings.coopMatrix,
                     onCheckedChange = { v -> onChange { s -> s.copy(coopMatrix = v) } }
                 )
+                ParallelInferences(settings, onChange)
+
+                if (settings.advanced) {
                 SwitchRow(
                     title = "CPU assist (hybrid GPU + CPU)",
                     description = "CPU workers take interpolations from the same queue as the GPU. Gains when the " +
@@ -314,25 +332,7 @@ fun SettingsScreen(
                         "core measured 25-30% slower on a real job, even though it looks slightly faster in a short test."
                 )
 
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "Parallel inferences: " +
-                        if (settings.workers == 0) "automatic (2 on the GPU)" else "${settings.workers} at a time",
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 13.sp
-                )
-                Slider(
-                    value = settings.workers.toFloat(),
-                    onValueChange = { v -> onChange { s -> s.copy(workers = v.toInt()) } },
-                    valueRange = 0f..4f,
-                    steps = 3
-                )
-                Caption(
-                    "One inference cannot keep eight cores busy: the threads spend their time waiting on memory. " +
-                        "Running several at once filled the cores and measured 2.1× the throughput with the same output " +
-                        "(125 ms against 259 ms per frame). Each parallel inference loads its own copy of the model, so raise " +
-                        "this only if the benchmark wins with the extra memory."
-                )
+                }
             }
 
             Section("Output video") {
@@ -403,7 +403,7 @@ fun SettingsScreen(
                 }
             }
 
-            Section("2D animation and finishing") {
+            if (settings.advanced) Section("2D animation and finishing") {
                 SwitchRow(
                     title = "Frame deduplication",
                     description = "Skips identical frames. Enable for 2D animation, leave off for live-action video.",
@@ -506,7 +506,7 @@ fun SettingsScreen(
 
             Section("About") {
                 Text(
-                    "FlowFrames Android 1.6.0 — a rewrite of the FlowFrames (Windows) pipeline for Android: " +
+                    "FlowFrames Android 1.6.3 — a rewrite of the FlowFrames (Windows) pipeline for Android: " +
                         "MediaCodec decoding, RIFE interpolation on the GPU (ncnn Vulkan) or the CPU, hardware encoding " +
                         "and MP4 muxing.",
                     fontSize = 12.sp,
@@ -561,3 +561,36 @@ private fun SwitchRow(
 private fun fpsLabel(fps: Double): String =
     if (fps % 1.0 == 0.0) String.format(Locale.US, "%.0f", fps)
     else String.format(Locale.US, "%.3f", fps).trimEnd('0').trimEnd('.')
+
+/** Off / 1-4 / Auto. "Off" runs one pair at a time with nothing overlapping, to measure the gain. */
+@Composable
+private fun ParallelInferences(settings: Settings, onChange: ((Settings) -> Settings) -> Unit) {
+    Text(
+        "Parallel inferences: " + when {
+            settings.workers == Settings.WORKERS_OFF -> "off"
+            settings.workers == Settings.WORKERS_AUTO -> "automatic (2 on the GPU)"
+            else -> "${settings.workers} at a time"
+        },
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 13.sp
+    )
+    listOf(
+        listOf(Settings.WORKERS_OFF to "Off", 1 to "1", 2 to "2"),
+        listOf(3 to "3", 4 to "4", Settings.WORKERS_AUTO to "Auto")
+    ).forEach { row ->
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            row.forEach { (v, label) ->
+                FilterChip(
+                    selected = settings.workers == v,
+                    onClick = { onChange { s -> s.copy(workers = v) } },
+                    label = { Text(label) }
+                )
+            }
+        }
+    }
+    Caption(
+        "Off: one inference at a time and the next frames are only read once the previous ones are " +
+            "encoded, nothing overlaps. 1: one inference at a time, but decoding and encoding overlap it. " +
+            "2 or more: several inferences in flight, each with its own copy of the model (more memory)."
+    )
+}

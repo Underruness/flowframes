@@ -87,7 +87,7 @@ fun MainScreen(
                     Column {
                         Text("FlowFrames", fontWeight = FontWeight.Bold)
                         Text(
-                            "RIFE 4.9 · on-device interpolation",
+                            "${settings.ncnnModel.label.substringBefore(" (")} · on-device interpolation",
                             fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -144,7 +144,7 @@ fun MainScreen(
             .padding(padding)
             .fillMaxSize()) {
             SettingsSummary(settings)
-            SystemPanel(running)
+            SystemPanel(running, settings.advanced)
             if (jobs.isEmpty()) {
                 EmptyState(onAdd = onAdd)
             } else {
@@ -196,7 +196,8 @@ private fun SettingsSummary(settings: Settings) {
             Text(res, fontSize = 13.sp)
             Text("·", color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(
-                if (settings.quality == com.flowframes.android.job.AiQuality.HIGH) "high quality" else "fast",
+                if (settings.quality == com.flowframes.android.job.AiQuality.HIGH) "high quality (CPU)"
+                else settings.ncnnModel.label.substringBefore(" ("),
                 fontSize = 13.sp
             )
             Text("·", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -423,7 +424,7 @@ private fun JobTimer(job: JobItem) {
 
 /** RAM and temperatures, refreshed every 2 s (every 5 s when idle). */
 @Composable
-private fun SystemPanel(running: Boolean) {
+private fun SystemPanel(running: Boolean, advanced: Boolean) {
     val context = androidx.compose.ui.platform.LocalContext.current
     var snap by remember { mutableStateOf<SystemMonitor.Snapshot?>(null) }
     LaunchedEffect(running) {
@@ -442,12 +443,18 @@ private fun SystemPanel(running: Boolean) {
         v >= 60 -> Warn
         else -> null
     }
+    fun battColor(v: Double?) = when {
+        v == null -> null
+        v >= 48 -> Danger
+        v >= 42 -> Warn
+        else -> null
+    }
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("RAM", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Accent)
+            val phone = String.format(Locale.US, "%.1f/%.1f GB", (s.sysTotalMb - s.sysAvailMb) / 1024.0, s.sysTotalMb / 1024.0)
             Text(
-                "app ${s.appPssMb} MB (gpu ${s.graphicsMb}) · phone " +
-                    String.format(Locale.US, "%.1f/%.1f GB", (s.sysTotalMb - s.sysAvailMb) / 1024.0, s.sysTotalMb / 1024.0) +
+                (if (advanced) "app ${s.appPssMb} MB (gpu ${s.graphicsMb}) · phone $phone" else phone) +
                     if (s.lowMemory) " · LOW" else "",
                 fontSize = 11.sp,
                 color = if (s.lowMemory) Danger else MaterialTheme.colorScheme.onSurfaceVariant
@@ -455,14 +462,17 @@ private fun SystemPanel(running: Boolean) {
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("TEMP", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Accent)
-            listOf("CPU" to s.cpuC, "GPU" to s.gpuC, "NPU" to s.npuC, "Batt" to s.batteryC).forEach { (label, v) ->
+            val temps = if (advanced) listOf("CPU" to s.cpuC, "GPU" to s.gpuC, "NPU" to s.npuC, "Batt" to s.batteryC)
+            else listOf("Battery" to s.batteryC)
+            temps.forEach { (label, v) ->
                 Text(
                     "$label ${t(v)}",
                     fontSize = 11.sp,
-                    color = tempColor(v) ?: MaterialTheme.colorScheme.onSurfaceVariant
+                    color = (if (label.startsWith("Batt")) battColor(v) else tempColor(v))
+                        ?: MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            s.headroom?.let {
+            if (advanced) s.headroom?.let {
                 Text(
                     String.format(Locale.US, "headroom %.0f%%", it * 100),
                     fontSize = 11.sp,

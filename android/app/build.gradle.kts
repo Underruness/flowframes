@@ -20,8 +20,8 @@ android {
         applicationId = "com.flowframes.android"
         minSdk = 26
         targetSdk = 34
-        versionCode = 11
-        versionName = "1.6.2"
+        versionCode = 12
+        versionName = "1.6.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Ship 64-bit ARM by default (every Android phone since ~2016).
@@ -43,6 +43,9 @@ android {
                 storePassword = keystoreProps.getProperty("storePassword")
                 keyAlias = keystoreProps.getProperty("keyAlias")
                 keyPassword = keystoreProps.getProperty("keyPassword")
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
             }
         }
     }
@@ -95,6 +98,12 @@ android {
     }
 
     packaging {
+        // Native libraries are extracted at install time instead of being loaded straight from the
+        // APK: that needs them stored uncompressed and page-aligned, which an APK re-signed or
+        // re-packed by another tool may lose ("library libonnxruntime4j_jni.so not found").
+        jniLibs {
+            useLegacyPackaging = true
+        }
         resources {
             excludes += setOf("/META-INF/{AL2.0,LGPL2.1}", "/META-INF/DEPENDENCIES")
         }

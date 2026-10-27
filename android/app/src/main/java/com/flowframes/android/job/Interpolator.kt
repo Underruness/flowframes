@@ -334,7 +334,7 @@ class Interpolator(
         val heapBudget = Runtime.getRuntime().maxMemory() / 2
         val hybrid = pool.distinctEngines.size > 1
         val capacity = (heapBudget / bytesPerPair.coerceAtLeast(1L)).toInt()
-            .coerceIn(1, if (hybrid) maxOf(4, pool.workers * 2) else maxOf(2, pool.workers))
+            .coerceIn(1, if (settings.sequential) 1 else if (hybrid) maxOf(4, pool.workers * 2) else maxOf(2, pool.workers))
         val buffers = IntArrayPool(pixels, maxFree = (capacity + 2) * (perPairInfer + 1) + 2)
         val window = OrderedWindow<PendingPair>(capacity) { pair ->
             written += encodePair(encoder, pair, timing)
@@ -342,6 +342,7 @@ class Interpolator(
             pair.first.release()
             pair.second.release()
         }
+        if (settings.sequential) log("Parallel inferences off: one pair at a time, no overlap")
         log(
             "Pipeline: ${pool.workers} inference session(s) × ${pool.threadsPerWorker} threads " +
                 "(${pool.totalThreads} total) · window of $capacity pair(s) · " +
@@ -365,6 +366,8 @@ class Interpolator(
                 }
             }
             window.offer(PendingPair(a.retain(), b.retain(), items, frames, futures))
+            // "Off": wait for this pair and encode it before decoding the next one.
+            if (settings.sequential) window.drain()
         }
 
         while (true) {

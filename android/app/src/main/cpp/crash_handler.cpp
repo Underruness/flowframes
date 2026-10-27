@@ -145,10 +145,14 @@ const char* currentStage() {
     return g_stage.load();
 }
 
-// libomp (statically linked through ncnn) aborted on an Honor / Android 17 phone while building
-// its CPU affinity topology ("__kmp_affinity_initialize" → abort, first parallel region of the
-// process, inside ncnn's fp16 weight conversion). ncnn pins its own threads when it wants to, so
-// OpenMP's affinity layer is switched off before the runtime reads its environment.
+// libomp is linked statically into this library (ncnn's -static-openmp). A static libomp shuts
+// itself down when the last thread that used OpenMP exits, and starts from scratch on the next
+// parallel region. That restart is what aborted on an Honor / Android 17 phone: every benchmark
+// configuration (and every job's GPU build) runs on a fresh thread, so the first configuration
+// initialised OpenMP, its thread exited, and the second one re-initialised a half torn-down
+// runtime ("__kmp_create_affinity_none_places" -> KMP_ASSERT -> abort, inside ncnn's fp16 weight
+// conversion). A thread that enters OpenMP once and then lives as long as the process keeps the
+// runtime alive, so it is initialised exactly once. The affinity layer stays off as well.
 __attribute__((constructor(101))) static void ffOpenMpEnv() {
     setenv("KMP_AFFINITY", "disabled", 1);
     setenv("OMP_PROC_BIND", "false", 1);
