@@ -318,6 +318,73 @@ Autres ajouts de journalisation, tous copiables depuis les réglages :
 * une ligne `Diagnosis:` qui nomme le poste dominant et donne la conséquence chiffrée (par exemple
   le gain attendu en passant à 480p), et signale un throttling supérieur à 10 %.
 
+### Version 1.4.0 — plusieurs inférences en parallèle
+
+Objectif de l'utilisateur : 3 images source/s à x4 sur un Snapdragon 8 Elite. Après la 1.3.0 il
+était à 1,40 image source/s, soit ~234 ms par inférence à 576×576 (mesure à 1920×1088 : 1473 ms
+pour 2,09 MPx, ramené au canevas réel).
+
+**Piste écartée par la mesure : partager le tronc entre les phases.** À x4, trois phases sont
+demandées par paire. Si le pas de temps n'entrait dans le graphe qu'à la fin, une seule passe
+suffirait pour les trois. L'analyse du graphe (`/tmp/ts2.py`, tracé des niveaux topologiques) montre
+l'inverse : `timestep` est dilaté au niveau 19/237 puis entre dans **chacun** des quatre blocs
+(niveaux 20, 78, 131, 184). Chaque phase paie donc la cascade complète ; aucune mutualisation n'est
+possible sans changer le modèle.
+
+**Le vrai gisement : le parallélisme.** Une inférence ne sature pas les cœurs. Sur l'appareil, 4, 6
+et 8 threads donnent 857, 814 et 885 ms ; l'écart est dans le bruit, ce qui est la signature d'une
+charge limitée par la latence mémoire : les threads attendent. Des inférences *indépendantes*, elles,
+remplissent la machine. Mesuré à 576×576 avec `android/tools/concurrency_probe.py` (deux passes,
+résultats reproductibles) :
+
+| Configuration | ms par inférence | Débit |
+|---|---|---|
+| 1 session × 8 threads | 259 | 3,9 inf/s |
+| 2 sessions × 4 threads | 147 | 6,8 inf/s |
+| 3 sessions × 2 threads | 162 | 6,2 inf/s |
+| 4 sessions × 2 threads | **125** | **8,0 inf/s** |
+
+Soit **2,1× le débit, à sortie identique au bit près**. Le pipeline est donc devenu une chaîne à trois
+étages :
+
+1. le thread de tâche décode, calcule les métriques et alimente une fenêtre bornée de paires ;
+2. un pool de sessions calcule les phases en parallèle (chacune sur son moteur ONNX Runtime) ;
+3. l'encodeur consomme les résultats **dans l'ordre**, en attendant le future de chaque phase.
+
+Aucune image n'est redistribuée ni recalculée : un test compare le pool de 3 sessions à un moteur
+unique et exige une égalité **bit à bit** (delta 0f) sur les trois phases.
+
+Points de conception qui comptent :
+
+* **Ordre garanti** par une `OrderedWindow` (testée) et par `Future.get()` dans l'ordre de soumission.
+  Une coupe franche vide la fenêtre avant d'écrire l'image de la coupe, sinon la sortie serait
+désordonnée autour du plan.
+* **Fenêtre bornée** : la mémoire est du tas Java (`FloatArray`), pas de la RAM. Le budget est
+  `maxMemory() / 2` et la fenêtre tombe à 1 paire en 1080p (~130 Mo par paire). Le journal indique la
+  taille retenue et la mémoire de tampons correspondante.
+* **Mémoire par session** : chaque session charge sa copie du modèle (~21 Mo) et son arène. 3
+  sessions ≈ 3× la mémoire du modèle, d'où le réglage exposé et le rappel du banc d'essai.
+* **Arrêt propre** : si une inférence est encore en cours à l'annulation, les sessions ne sont pas
+  fermées sous elle (crash natif) ; le processus récupère.
+
+Réglages : « Parallel inferences » (0 = automatique → 3 sessions × 2 threads sur 8 cœurs, ce qui
+laisse deux cœurs aux codecs). Le banc d'essai mesure désormais 1×, 2×, 3× et 4× en parallèle, plus
+XNNPACK et les formes dynamiques, avec une passe soutenue ; « Apply best » écrit le gagnant.
+
+Gain attendu sur ce téléphone : 1,4 → ~2,2-2,7 image source/s à x4 (prédiction, à confirmer par le
+banc d'essai embarqué). 3 image source/s reste hors de portée à x4 sans toucher au modèle ; à x2, la
+même machine dépasse déjà 2,8 image source/s et le parallélisme la place au-delà de 3.
+
+Pistes suivantes, par ordre de rendement attendu :
+
+* **fp16** : la qualité est acquise (aucune perte visible), mais ORT n'a de noyaux fp16 ARM que si
+  le fournisseur les prend ; `GridSample` n'en a pas, donc le gain réel dépend des `Cast` insérés.
+  À mesurer sur l'appareil avant d'être proposé.
+* **Modèle plus léger** (RIFE-lite ou IFRNet) : le seul levier qui divise réellement le coût, au prix
+  d'un réentraînement ou d'un autre choix de qualité.
+* **GPU** : `rife-ncnn-vulkan` est l'implémentation rapide de référence, mais elle demande du code
+  natif NDK et un modèle ncnn ; impossible à valider depuis cette VM, donc pas livré.
+
 ## Limites connues
 
 * Sortie **MP4 uniquement** (H.264 ou HEVC), pas de GIF/PNG/MKV.

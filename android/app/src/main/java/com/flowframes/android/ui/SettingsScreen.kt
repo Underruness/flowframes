@@ -170,6 +170,26 @@ fun SettingsScreen(
                     "Automatic leaves two cores for the decoder, the encoder and the pixel conversion. Using every " +
                         "core measured 25-30% slower on a real job, even though it looks slightly faster in a short test."
                 )
+
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Parallel inferences: " +
+                        if (settings.workers == 0) "automatic" else "${settings.workers} at a time",
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 13.sp
+                )
+                Slider(
+                    value = settings.workers.toFloat(),
+                    onValueChange = { v -> onChange { s -> s.copy(workers = v.toInt()) } },
+                    valueRange = 0f..4f,
+                    steps = 3
+                )
+                Caption(
+                    "One inference cannot keep eight cores busy: the threads spend their time waiting on memory. " +
+                        "Running several at once filled the cores and measured 2.1× the throughput with the same output " +
+                        "(125 ms against 259 ms per frame). Each parallel inference loads its own copy of the model, so raise " +
+                        "this only if the benchmark wins with the extra memory."
+                )
             }
 
             Section("Output video") {
@@ -301,10 +321,10 @@ fun SettingsScreen(
 
             Section("Diagnostics") {
                 Text(
-                    "The engine benchmark loads the model several ways (execution provider, thread count, " +
-                        "execution mode, static shapes), adds a sustained pass to expose throttling, and reports " +
-                        "the real cost per frame on this device. It takes about a minute and writes the result " +
-                        "to the log, which stays copyable.",
+                    "The engine benchmark loads the model several ways (parallel sessions, thread count, " +
+                        "execution provider, execution mode, static shapes), adds a sustained pass to expose " +
+                        "throttling, and reports the real cost per frame on this device. It takes about two " +
+                        "minutes and writes the result to the log, which stays copyable.",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -329,7 +349,7 @@ fun SettingsScreen(
 
             Section("About") {
                 Text(
-                    "FlowFrames Android 1.3.0 — a rewrite of the FlowFrames (Windows) pipeline for Android: " +
+                    "FlowFrames Android 1.4.0 — a rewrite of the FlowFrames (Windows) pipeline for Android: " +
                         "MediaCodec decoding, RIFE 4.9 interpolation through ONNX Runtime, hardware encoding " +
                         "and MP4 muxing.",
                     fontSize = 12.sp,

@@ -201,7 +201,8 @@ class MainActivity : ComponentActivity() {
                                 AppGraph.settings.update { s ->
                                     s.copy(
                                         // 0 keeps "automatic", so a later CPU change still adapts.
-                                        threads = if (best.threads == RifeEngine.defaultThreads()) 0 else best.threads,
+                                        threads = if (best.totalThreads == RifeEngine.defaultThreads()) 0 else best.totalThreads,
+                                        workers = best.workers,
                                         useXnnpack = best.useXnnpack,
                                         parallelOps = best.parallelOps,
                                         useNnapi = false

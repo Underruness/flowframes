@@ -9,10 +9,13 @@ import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import androidx.documentfile.provider.DocumentFile
 import com.flowframes.android.core.DeviceInfo
+import com.flowframes.android.core.FloatArrayPool
 import com.flowframes.android.core.FrameMath
+import com.flowframes.android.core.InferencePool
 import com.flowframes.android.core.InterpPlan
 import com.flowframes.android.core.LatencyStats
 import com.flowframes.android.core.Naming
+import com.flowframes.android.core.OrderedWindow
 import com.flowframes.android.core.RifeEngine
 import com.flowframes.android.video.VideoDecoder
 import com.flowframes.android.video.VideoEncoder
@@ -21,6 +24,19 @@ import java.io.File
 import java.util.Locale
 
 class JobCancelledException : Exception("Job cancelled")
+
+/**
+ * One source pair in flight: its two frames (owned copies, so the decoder can move on), the
+ * interpolated frames being produced by the pool, and the futures that fill them.
+ */
+private class PendingPair(
+    val startPts: Long,
+    val endPts: Long,
+    val first: FloatArray,
+    val second: FloatArray,
+    val frames: List<FloatArray>,
+    val futures: List<java.util.concurrent.Future<*>>
+)
 
 /**
  * Per-stage wall-clock accounting. Kept in the job log so a slow run can be diagnosed instead of
@@ -43,6 +59,14 @@ private class StageTiming {
             decodeNs += elapsed
             decodeMs.add((elapsed / 1_000_000).toInt())
         }
+    }
+
+    /** Records an inference measured on a worker thread. */
+    @Synchronized
+    fun recordInference(ns: Long) {
+        inferNs += ns
+        inferCalls++
+        inferenceMs.add((ns / 1_000_000).toInt())
     }
 
     fun <T> infer(block: () -> T): T {
@@ -144,26 +168,31 @@ class Interpolator(
 
             val modelPath = ModelStore.prepare(context, settings.quality, log)
             val automatic = RifeEngine.defaultThreads()
-            val threads = if (settings.threads > 0) settings.threads else automatic
+            val totalThreads = if (settings.threads > 0) settings.threads else automatic
+            val workers = (if (settings.workers > 0) settings.workers else InferencePool.defaultWorkers())
+                .coerceAtMost(totalThreads)
+            val threadsPerWorker = (totalThreads / workers).coerceAtLeast(1)
             log(
-                "Threads: $threads" +
+                "Threads: $totalThreads" +
                     (if (settings.threads > 0) " (manual)" else " (automatic: cores - 2, capped at 6)") +
-                    " · ${settings.factor - 1} inference(s) per source frame"
+                    " · $workers parallel inference(s) of $threadsPerWorker threads · " +
+                    "${settings.factor - 1} inference(s) per source frame"
             )
             if (settings.useNnapi) {
                 log("NNAPI requested: it was 6x slower than the CPU on a Snapdragon 8 Elite. Run the benchmark to compare on this device.")
             }
 
-            RifeEngine(
+            InferencePool(
                 modelPath = modelPath,
-                intraOpThreads = threads,
+                workers = workers,
+                threadsPerWorker = threadsPerWorker,
                 useNnapi = settings.useNnapi,
                 useXnnpack = settings.useXnnpack,
                 parallelOps = settings.parallelOps,
                 frameWidth = targetW,
                 frameHeight = targetH,
                 log = log
-            ).use { engine ->
+            ).use { pool ->
                 val outPfd = outTarget.fd
                 val inPfd = context.contentResolver.openFileDescriptor(inputUri, "r")
                     ?: throw IllegalStateException("Cannot open the source video")
@@ -192,7 +221,7 @@ class Interpolator(
                         log = log
                     )
 
-                    frames = runLoop(engine, decoder, encoder!!, info, targetW, targetH, factor, srcFps)
+                    frames = runLoop(pool, decoder, encoder!!, info, targetW, targetH, factor, srcFps)
                     encoder.finishVideo()
                     if (encoder.hasAudio) copyAudio(inputUri, encoder, log)
                 } finally {
@@ -240,7 +269,7 @@ class Interpolator(
     }.getOrNull()
 
     private fun runLoop(
-        engine: RifeEngine,
+        pool: InferencePool,
         decoder: VideoDecoder,
         encoder: VideoEncoder,
         info: VideoInfo,
@@ -250,11 +279,12 @@ class Interpolator(
         srcFps: Double
     ): Int {
         val pixels = width * height
+        val planeSize = pixels * 3
+        val buffers = FloatArrayPool(planeSize)
         var prev = IntArray(pixels)
         var cur = IntArray(pixels)
-        var prevPlanar = FloatArray(pixels * 3)
-        var curPlanar = FloatArray(pixels * 3)
-        val midPlanar = FloatArray(pixels * 3)
+        var prevPlanar = FloatArray(planeSize)
+        var curPlanar = FloatArray(planeSize)
 
         var firstPlanar: FloatArray? = null
         var lastPts = 0L
@@ -272,12 +302,35 @@ class Interpolator(
         val expectedFrames = if (info.durationUs > 0) {
             (info.durationSeconds * srcFps).toInt().coerceAtLeast(1)
         } else 1000
-        // A 576x576 RIFE pass costs ~380 ms on current phones, so 30 s in is enough to sample.
+        // A 576x576 RIFE pass costs a few hundred ms on current phones, so 30 s in is enough.
         val heatCheckAfter = 90
         // A long job is where throttling shows up, so the log gets a heartbeat every minute.
         val heartbeatEveryNs = 60_000_000_000L
         var lastBeatNs = System.nanoTime()
         var lastBeatDecoded = 0
+
+        pool.onInference = { ns -> timing.recordInference(ns) }
+
+        // Interpolated frames are produced out of order by the pool and encoded in order here.
+        // The window bounds how far the decoder runs ahead: one pair in flight holds its two source
+        // frames plus one output per phase, so a 1080p job has to keep the window short.
+        val bytesPerPair = (2L + phases.size) * planeSize * 4
+        // Frames are Java-heap FloatArrays, so the window is budgeted against the heap this app was
+        // given (largeHeap), never against the phone's RAM: at 1080p one pair is already ~130 MB.
+        val heapBudget = Runtime.getRuntime().maxMemory() / 2
+        val capacity = (heapBudget / bytesPerPair.coerceAtLeast(1L)).toInt()
+            .coerceIn(1, maxOf(2, pool.workers))
+        val window = OrderedWindow<PendingPair>(capacity) { pair ->
+            written += encodePair(encoder, pair, phases, timing)
+            buffers.release(pair.first)
+            buffers.release(pair.second)
+            pair.frames.forEach { buffers.release(it) }
+        }
+        log(
+            "Pipeline: ${pool.workers} inference session(s) × ${pool.threadsPerWorker} threads " +
+                "(${pool.totalThreads} total) · window of $capacity pair(s) · " +
+                "${bytesPerPair * capacity / (1024 * 1024)} MB of frame buffers"
+        )
 
         while (true) {
             checkCancelled()
@@ -296,7 +349,7 @@ class Interpolator(
                 timing.encode { encoder.encodePlanar(curPlanar, frame.ptsUs) }
                 written++
                 System.arraycopy(cur, 0, prev, 0, pixels)
-                System.arraycopy(curPlanar, 0, prevPlanar, 0, pixels * 3)
+                System.arraycopy(curPlanar, 0, prevPlanar, 0, planeSize)
                 firstPts = frame.ptsUs
                 lastPts = frame.ptsUs
                 havePrev = true
@@ -320,6 +373,9 @@ class Interpolator(
 
                 InterpPlan.Decision.CUT -> {
                     cuts++
+                    // Everything queued must be written before the cut frame, or the output is
+                    // out of order around the cut.
+                    window.drain()
                     timing.encode { encoder.encodePlanar(curPlanar, frame.ptsUs) }
                     written++
                     adopt(cur, curPlanar, prev, prevPlanar, pixels)
@@ -327,19 +383,18 @@ class Interpolator(
                 }
 
                 InterpPlan.Decision.INTERPOLATE -> {
-                    val span = frame.ptsUs - lastPts
                     interpolatedPairs++
+                    val first = buffers.acquire().also { System.arraycopy(prevPlanar, 0, it, 0, planeSize) }
+                    val second = buffers.acquire().also { System.arraycopy(curPlanar, 0, it, 0, planeSize) }
+                    val frames = ArrayList<FloatArray>(phases.size)
+                    val futures = ArrayList<java.util.concurrent.Future<*>>(phases.size)
                     for (t in phases) {
                         checkCancelled()
-                        timing.infer {
-                            engine.interpolate(prevPlanar, curPlanar, width, height, t.toFloat(), midPlanar)
-                        }
-                        val pts = lastPts + (span * t).toLong()
-                        timing.encode { encoder.encodePlanar(midPlanar, pts) }
-                        written++
+                        val out = buffers.acquire()
+                        frames += out
+                        futures += pool.submit(first, second, width, height, t.toFloat(), out)
                     }
-                    timing.encode { encoder.encodePlanar(curPlanar, frame.ptsUs) }
-                    written++
+                    window.offer(PendingPair(lastPts, frame.ptsUs, first, second, frames, futures))
                     adopt(cur, curPlanar, prev, prevPlanar, pixels)
                     lastPts = frame.ptsUs
                 }
@@ -368,6 +423,9 @@ class Interpolator(
             }
         }
 
+        window.drain()
+        pool.onInference = null
+
         if (skippedDuplicates > 0) log("Deduplication: $skippedDuplicates duplicate frame(s) skipped")
         if (cuts > 0) log("Scene changes: $cuts cut(s) passed through without interpolation")
 
@@ -375,16 +433,26 @@ class Interpolator(
         if (settings.loop && decoded > 1 && loopStart != null) {
             val avgSpan = if (decoded > 1) (lastPts - firstPts) / (decoded - 1) else 33_333L
             log("Loop interpolation (last → first frame)")
+            val first = buffers.acquire().also { System.arraycopy(prevPlanar, 0, it, 0, planeSize) }
+            val second = buffers.acquire().also { System.arraycopy(loopStart, 0, it, 0, planeSize) }
+            val frames = ArrayList<FloatArray>(phases.size)
+            val futures = ArrayList<java.util.concurrent.Future<*>>(phases.size)
+            pool.onInference = { ns -> timing.recordInference(ns) }
             for (t in phases) {
                 checkCancelled()
-                timing.infer {
-                    engine.interpolate(prevPlanar, loopStart, width, height, t.toFloat(), midPlanar)
-                }
-                timing.encode { encoder.encodePlanar(midPlanar, lastPts + (avgSpan * t).toLong()) }
-                written++
+                val out = buffers.acquire()
+                frames += out
+                futures += pool.submit(first, second, width, height, t.toFloat(), out)
             }
-            timing.encode { encoder.encodePlanar(loopStart, lastPts + avgSpan) }
-            written++
+            val tail = OrderedWindow<PendingPair>(1) { pair ->
+                written += encodePair(encoder, pair, phases, timing)
+                buffers.release(pair.first)
+                buffers.release(pair.second)
+                pair.frames.forEach { buffers.release(it) }
+            }
+            tail.offer(PendingPair(lastPts, lastPts + avgSpan, first, second, frames, futures))
+            tail.drain()
+            pool.onInference = null
         }
 
         if (decoded == 0) throw IllegalStateException("No frame could be decoded from this video")
@@ -399,6 +467,37 @@ class Interpolator(
         log("Thermal status at end: ${thermal()}")
         log(diagnosis(decoded, timing, wallMs.toDouble(), width, height, factor))
         return written
+    }
+
+    /** Waits for one pair's interpolations and encodes its frames in order. */
+    private fun encodePair(
+        encoder: VideoEncoder,
+        pair: PendingPair,
+        phases: DoubleArray,
+        timing: StageTiming
+    ): Int {
+        var produced = 0
+        val span = pair.endPts - pair.startPts
+        for (i in phases.indices) {
+            checkCancelled()
+            awaitInference(pair.futures[i])
+            val pts = pair.startPts + (span * phases[i]).toLong()
+            timing.encode { encoder.encodePlanar(pair.frames[i], pts) }
+            produced++
+        }
+        timing.encode { encoder.encodePlanar(pair.second, pair.endPts) }
+        return produced + 1
+    }
+
+    private fun awaitInference(future: java.util.concurrent.Future<*>) {
+        try {
+            future.get()
+        } catch (e: java.util.concurrent.ExecutionException) {
+            throw e.cause ?: e
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw JobCancelledException()
+        }
     }
 
     private fun heapUsedMb(): Long {

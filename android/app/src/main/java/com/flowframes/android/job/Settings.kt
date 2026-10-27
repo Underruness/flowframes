@@ -41,6 +41,11 @@ data class Settings(
     val parallelOps: Boolean = false,
     /** 0 = automatic. */
     val threads: Int = 0,
+    /**
+     * Inferences computed at the same time. One inference cannot fill eight cores, so several run
+     * in parallel: 0 = automatic (see [com.flowframes.android.core.InferencePool]).
+     */
+    val workers: Int = 0,
     val outputTreeUri: String? = null
 ) {
     fun planOptions(): com.flowframes.android.core.InterpPlan.Options = com.flowframes.android.core.InterpPlan.Options(
@@ -94,6 +99,7 @@ class SettingsStore(context: Context) {
             useXnnpack = prefs.getBoolean("useXnnpack", d.useXnnpack),
             parallelOps = prefs.getBoolean("parallelOps", d.parallelOps),
             threads = prefs.getInt("threads", d.threads).coerceIn(0, 16),
+            workers = prefs.getInt("workers", d.workers).coerceIn(0, 6),
             outputTreeUri = prefs.getString("outputTreeUri", d.outputTreeUri)
         )
     }
@@ -117,6 +123,7 @@ class SettingsStore(context: Context) {
             .putBoolean("useXnnpack", s.useXnnpack)
             .putBoolean("parallelOps", s.parallelOps)
             .putInt("threads", s.threads)
+            .putInt("workers", s.workers)
             .putString("outputTreeUri", s.outputTreeUri)
             .apply()
     }
