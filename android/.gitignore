@@ -12,3 +12,14 @@ captures/
 keystore.properties
 app/keystore/*.jks
 app/keystore/*.keystore
+
+# ncnn prebuilt, downloaded by app/src/main/cpp/CMakeLists.txt
+app/src/main/cpp/ncnn-android
+app/src/main/cpp/ncnn-*-android-vulkan.zip
+
+# ncnn RIFE models (the root .gitignore drops every *.bin and *.param)
+!app/src/main/assets/ncnn/**/flownet.bin
+!app/src/main/assets/ncnn/**/flownet.param
+keystore.properties
+*.jks
+*.keystore

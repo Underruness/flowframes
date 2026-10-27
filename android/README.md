@@ -7,7 +7,8 @@ L'application d'origine est un programme Windows (C#/.NET + binaires NCNN/CUDA).
 `android/` ne réutilise pas ce code : il refait le même pipeline avec les API Android.
 
 ```
-vidéo source ──► MediaCodec (décodage matériel) ──► RIFE 4.9 / ONNX Runtime
+vidéo source ──► MediaCodec (décodage matériel) ──► RIFE 4.9 / ncnn Vulkan (GPU)
+                                                     └─ repli : ncnn CPU, puis ONNX Runtime CPU
               ──► MediaCodec (encodage matériel) ──► MediaMuxer (MP4 + audio copié)
 ```
 
@@ -385,7 +386,181 @@ Pistes suivantes, par ordre de rendement attendu :
 * **GPU** : `rife-ncnn-vulkan` est l'implémentation rapide de référence, mais elle demande du code
   natif NDK et un modèle ncnn ; impossible à valider depuis cette VM, donc pas livré.
 
-## Limites connues
+### Version 1.5.0 — RIFE sur le GPU (ncnn + Vulkan)
+
+La 1.4.0 concluait que 3 images source/s à x4 restaient hors de portée **sur le CPU**. La 1.5.0 change
+d'unité de calcul : RIFE tourne désormais sur le GPU du téléphone via **ncnn + Vulkan**, c'est-à-dire
+l'implémentation que FlowFrames utilise sur PC (`rife-ncnn-vulkan`), compilée en natif (NDK) dans l'APK.
+
+Pourquoi c'est le bon levier : sur le CPU, l'opérateur `GridSample` (le warp) n'a aucun noyau
+optimisé dans ONNX Runtime et coûtait ~43 % de chaque inférence ; sur le GPU, tout le graphe,
+warps compris, s'exécute en compute shaders fp16. Référence publique : RIFE 4.6 en ncnn atteint
+5,5 inférences/s en 720p sur un Snapdragon 8 Gen 3
+([hermitix](https://hermitix.com/2025/04/ncnn-rife-int8-quantization/)), soit ~17 inf/s une fois
+ramené aux 544×544 d'une vidéo 540×540. L'objectif (3 images source/s à x4) en demande 9.
+
+**Ce qui est livré**
+
+* `app/src/main/cpp/` : moteur natif (`rife_core.cpp`) + pont JNI (`rife_jni.cpp`) + couche
+  personnalisée `rife.Warp` de rife-ncnn-vulkan (licence MIT). Le shader de warp est modifié pour
+  garder ses **coordonnées d'échantillonnage en fp32** même quand le réseau calcule en fp16 (au-delà
+  de 512 px, le fp16 n'a qu'une précision de 0,25-0,5 px, ce qui flouterait le warp). Le chemin pack8,
+  supprimé des versions récentes de ncnn, est retiré.
+* ncnn 20261020 (`android-vulkan`, statique, Vulkan chargé à l'exécution via *simplevk*) : CMake le
+  télécharge au premier build. Un téléphone sans pilote Vulkan charge quand même la bibliothèque.
+* Modèles ncnn RIFE **4.9** (mêmes poids que le modèle ONNX) et **4.6** (~25 % plus léger) dans
+  `assets/ncnn/`.
+* `FrameEngine` : interface commune aux moteurs ; `InferencePool` accepte un moteur partagé
+  thread-safe (ncnn : un extracteur par appel) et attache désormais chaque thread à **son** moteur
+  (avant, deux tâches pouvaient tomber sur la même session ONNX en même temps).
+* `EngineFactory` : choix du moteur avec **auto-test** à la résolution de la tâche — RIFE appliqué à
+  une image et à elle-même doit rendre cette image (≥ 30 dB). Un pilote qui plante, renvoie des zéros
+  ou des NaN est écarté et la tâche passe au moteur suivant : GPU ncnn → CPU ncnn → ONNX Runtime.
+  Le mode « High quality » (ensemble) reste sur ONNX Runtime, seul à avoir ces poids.
+* Banc d'essai refait : GPU ×1/×2/×3, fp16 vs fp32, 4.9 vs 4.6, CPU ncnn, ONNX Runtime ; **chaque
+  sortie est comparée à la référence ONNX** (dB) et une configuration fausse ne peut pas gagner.
+  « Apply best » écrit moteur, modèle et fp16.
+
+**Validation (sur la VM, pas sur le téléphone)**
+
+| Mesure | Résultat |
+|---|---|
+| ncnn CPU vs ONNX Runtime, RIFE 4.9, 64×48 | 61,8 dB (identique) |
+| ncnn Vulkan (lavapipe) fp16 storage | 60,1 dB |
+| ncnn Vulkan, fp16 arithmetic | 50,5 dB (invisible) |
+| Vraies images 540×540 (Big Buck Bunny), ncnn 4.9 vs ONNX 4.9 | 63 dB |
+| Pool de 3 workers sur un moteur partagé | sortie identique au bit près |
+| CPU x86 2 cœurs, 540×540 : ONNX Runtime / ncnn 4.9 / ncnn 4.6 | ~470 / ~340 / ~250 ms |
+
+Les tests JVM (`NcnnRifeEngineTest`) pilotent la vraie bibliothèque JNI compilée pour l'hôte :
+
+```bash
+cd android
+NCNN_HOST=<ncnn-ubuntu> cmake -S native-test -B /tmp/hb -G Ninja && cmake --build /tmp/hb
+./gradlew testDebugUnitTest -PnativeTestLib=/tmp/hb     # sans -P, ces tests sont ignorés
+```
+
+Prévision pour un Snapdragon 8 Elite (Adreno 830) à 540×540, x4 : ~40-70 ms par inférence, soit
+**~5-8 images source/s** (estimation à partir du chiffre public ci-dessus, non mesurée ; le banc
+d'essai embarqué donne la vraie valeur). Le build NDK demande r30 (`ndkVersion` dans
+`app/build.gradle.kts`) : le prébuilt ncnn est compilé avec le libc++ de clang 21.
+
+### Version 1.5.1 — fp16, blocages et mode hybride GPU + CPU
+
+Mesure de la 1.5.0 sur Snapdragon 8 Elite (Adreno 830), 540x540 en x4 : **6 fps source avec le GPU en fp32** (contre 1,40 fps en 1.4.0 sur CPU). En revanche, l'arithmétique fp16 bloquait le GPU et figeait le benchmark.
+
+- **fp16 désactivé par défaut.** Le suspect principal est le chemin « cooperative matrix » d'Adreno, réactivé par ncnn 20261020 alors que la version 20260526 l'avait désactivé sur Qualcomm pour des bugs de pilote. Ce chemin a maintenant son propre interrupteur (désactivé), et il ne s'applique qu'avec le fp16. Sans fp16, ncnn garde son comportement par défaut, c'est-à-dire la configuration mesurée à 6 fps.
+- **Plus aucun blocage possible.**
+  - L'auto-test du moteur est limité à 45 s ; après un blocage, la tâche passe sur le CPU.
+  - Chaque configuration du benchmark est limitée à 90 s ; après un blocage du GPU, les tests GPU restants sont ignorés.
+  - Une inférence est limitée à 120 s pendant une tâche : la tâche échoue avec un message clair au lieu de rester figée.
+  - Un moteur bloqué n'est jamais libéré pendant qu'un appel natif tourne.
+- **Mode hybride (« CPU assist »).** Des workers ncnn CPU fp32 puisent dans la même file que les workers GPU. Chaque thread est attaché à un moteur, et la fenêtre d'images en avance est doublée pour que le GPU ne s'arrête pas en attendant une image CPU plus lente. Le journal de la tâche affiche la répartition (« Work split »).
+- **Ordre du benchmark.** Les configurations sûres passent en premier : ONNX, GPU ×1/×2/×3, GPU 4.6, les variantes hybrides (1×4T, 1×6T, 2×3T) et ncnn CPU. Les variantes fp16 passent en dernier. Le débit est mesuré avec toutes les inférences en file en même temps, comme dans une vraie tâche. Le rapport inclut la ligne d'infos Vulkan (pilote, fp16, coopmat).
+
+### Version 1.5.2 — benchmark en direct
+
+Mesures de la 1.5.1 sur Adreno 840, canevas de 1920x1088, en ms par inférence :
+
+| Configuration | ms/inférence | PSNR vs ONNX |
+|---|---|---|
+| ONNX Runtime CPU | 1317 | référence |
+| GPU ×3 | 249 | 73 dB |
+| GPU 4.6 ×2 | 198 | 45 dB |
+| GPU fp16 | 280 | 60 dB |
+| GPU fp16 + coopmat | 204 | 60 dB |
+| Hybride | 269 à 293 | 73 dB |
+
+- **Mode hybride :** il ne gagne rien. Le CPU met plus de 2 s par image, ne traite que 12 % des images et ralentit le GPU.
+- **fp16 + coopmat :** ce n'était pas un blocage. Le pilote a mis 98 s à construire les pipelines au premier lancement, puis cette configuration a été la plus rapide en RIFE 4.9.
+- **Logs en temps réel :** le benchmark annonce chaque configuration et chaque phase (chargement, warm-up, contrôle qualité, mesure). Toutes les 5 s, il affiche une ligne de progression avec le temps écoulé et le nombre d'inférences terminées.
+- **Réponses tardives :** une réponse arrivée après la limite est signalée comme lente, et le GPU est de nouveau utilisable.
+- **Limite de temps pour fp16 + coopmat :** 240 s, au benchmark comme à l'auto-test d'une tâche.
+
+### Version 1.6.0 — cache GPU, 1440p/4K, fps exact, moniteur
+
+- **Cache des shaders GPU persistant.** Les shaders SPIR-V compilés par ncnn et le cache de
+  pipelines du pilote Vulkan sont enregistrés dans `files/gpu-shader-cache`. Le premier lancement
+  en fp16 + coopmat (98 s de construction des pipelines sur l'Adreno 840) n'est payé qu'une fois ;
+  les lancements suivants relisent le cache. Le log et le benchmark affichent
+  `GPU cache: shaders: … compiled, … from the disk cache · GPU pipelines: …`. Un bouton
+  « Clear GPU shader cache » le vide (utile après une mise à jour du pilote).
+- **1440p et 4K.** Le « out of memory » au-dessus de 1080p venait du pipeline Java : chaque image
+  y était stockée en float (12 octets/pixel, ~100 Mo par image 4K) et copiée plusieurs fois. Les
+  images restent maintenant en ARGB 8 bits (4 octets/pixel), sont partagées sans copie entre les
+  deux paires qui les utilisent, et la conversion float ↔ 8 bits ainsi que la conversion
+  RGB → YUV de l'encodeur sont faites en C++. Au-dessus de 1440p une seule session GPU est
+  utilisée (une seule sature déjà le GPU). Nouveau choix « 4K » dans la résolution.
+- **FPS exact.** En plus du multiplicateur, on peut demander une cadence de sortie précise
+  (30, 48, 60, 90, 120, 144, 165, 240 ou une valeur libre comme 59.94). Les images de sortie sont
+  placées sur une grille régulière et RIFE est appelé avec le pas fractionnaire correspondant
+  (24 → 60 fps = x2,5) ; les images qui tombent sur une image source la réutilisent sans calcul.
+- **Moniteur et minuteur.** L'écran principal affiche la RAM (application, part GPU, téléphone) et
+  les températures CPU / GPU / NPU / batterie lues dans `/sys/class/thermal` (selon ce que le
+  constructeur autorise), ainsi que le temps écoulé, le temps restant estimé, l'heure de fin et,
+  à la fin, le temps total du travail. Remarque : RIFE tourne sur le GPU, pas sur le NPU ; la
+  température NPU est indicative.
+
+### Version 1.6.1 — mémoire des logs et crashs
+
+- **Logs persistants.** Chaque ligne du log est écrite immédiatement dans `files/logs/session.log`.
+  Au démarrage suivant, si la session précédente s'est mal terminée, l'appli ajoute en tête du log :
+  la raison donnée par Android (crash Java, crash natif, tué par manque de mémoire, ANR…), le
+  rapport du gestionnaire de signaux natif (signal, adresse, bibliothèque + offset, backtrace et
+  « étape native » en cours : chargement du modèle, construction des pipelines GPU, inférence,
+  sauvegarde du cache…) et les 60 dernières lignes de la session précédente.
+- **Sécurité GPU.** Si l'appli meurt pendant la construction d'un moteur GPU, le cache de
+  pipelines du pilote sur disque est désactivé automatiquement (le bouton « Clear GPU shader
+  cache » le réactive). Le cache n'est plus enregistré après chaque image mais une seule fois.
+- **Benchmark.** Fenêtre de logs en direct (temps écoulé, RAM, températures). Le benchmark utilise
+  maintenant des images 8 bits comme le travail réel, et le moteur ONNX garde ses entrées hors du
+  tas Java : le test ONNX 3 × 2T ne manque plus de mémoire. La mémoire est affichée après chaque
+  configuration.
+- **Température CPU.** Médiane des capteurs CPU, en ignorant les zones virtuelles ou de limite
+  (la 1.6.0 affichait 105 °C à cause de l'une d'elles). Les valeurs de tous les capteurs sont
+  écrites dans le log.
+
+### Version 1.6.2 — crash OpenMP et construction GPU visible
+
+- **Crash du benchmark identifié** grâce au rapport natif de la 1.6.1 : `SIGABRT` dans le runtime
+  OpenMP (`__kmp_affinity_initialize`) pendant la conversion fp16 des poids de ncnn
+  (`Net::load_model` → `Cast_arm::forward`). L'initialisation de l'affinité CPU d'OpenMP échoue sur
+  ce téléphone ; elle est désactivée (`KMP_AFFINITY=disabled`, `OMP_PROC_BIND=false`) avant le
+  premier usage d'OpenMP. ncnn gère lui-même ses threads.
+- **Cache de pipelines réactivé** : la 1.6.1 l'avait coupé à tort après ce crash ; il n'est
+  maintenant désactivé que si le crash a lieu dans le code du cache lui-même.
+- **Construction du moteur GPU visible dans les travaux** : une ligne toutes les 15 s avec le
+  temps écoulé, l'étape native en cours et le nombre de shaders / pipelines construits, et une
+  limite (150 s, 300 s en fp16 + coopmat) au-delà de laquelle le GPU est abandonné pour la session
+  au lieu de bloquer le travail.
+
+### Version 1.6.3 — vraie cause du crash OpenMP, vue simple, APK signé
+
+- **Crash du benchmark (cause réelle).** libomp est lié en statique ; dans ce cas il s'arrête
+  complètement quand le dernier thread qui l'a utilisé se termine, puis se ré-initialise au
+  prochain usage. Chaque configuration du benchmark (et chaque construction GPU d'un travail)
+  tourne sur un nouveau thread : la 2e configuration ré-initialisait un runtime à moitié démonté
+  et s'arrêtait sur une assertion (`__kmp_create_affinity_none_places`). Un thread créé au
+  chargement de la bibliothèque entre une fois dans OpenMP et vit aussi longtemps que l'appli :
+  OpenMP n'est initialisé qu'une seule fois.
+- **APK signé** avec une clé de release (v2 + v3) dans la CI : plus besoin de le re-signer. Les
+  bibliothèques natives sont extraites à l'installation, ce qui évite l'erreur
+  `libonnxruntime4j_jni.so not found` d'un APK re-signé par un autre outil.
+- **Vue avancée** (Réglages → Affichage). Désactivée par défaut : seuls les réglages de fps, de
+  résolution, du GPU et de la vidéo restent ; la RAM affiche celle du téléphone et la température
+  celle de la batterie. Activée : options CPU / ONNX, détail de la RAM, CPU / GPU / NPU.
+- **Nouveaux réglages par défaut** (appliqués une fois aux réglages existants) : résolution
+  source, moteur GPU, RIFE 4.6, 1 inférence parallèle, HEVC (H.265), débit élevé.
+- **Inférences parallèles « Off »** : une paire à la fois, rien ne se chevauche (la paire suivante
+  n'est lue qu'une fois la précédente encodée), pour mesurer le gain du recouvrement.
+- **Benchmark** en vue simple : configurations GPU seulement (plus RIFE 4.6 ×1 et 4.6 fp16 +
+  coopmat), la référence ONNX reste pour le contrôle de qualité.
+
+### Version 1.6.4 — signature v1
+
+- L'installateur Honor refusait la 1.6.3 (« does not contain any certificates ») : Gradle omet la
+  signature v1 (JAR) quand minSdk ≥ 24 et cet installateur ne lit que celle-là. La CI re-signe
+  maintenant l'APK avec `apksigner` en v1 + v2 + v3 et échoue si la v1 manque.
 
 * Sortie **MP4 uniquement** (H.264 ou HEVC), pas de GIF/PNG/MKV.
 * Les codecs décodables sont ceux exposés par `MediaCodec` sur l'appareil (H.264, HEVC, VP8/VP9
@@ -398,6 +573,8 @@ Pistes suivantes, par ordre de rendement attendu :
 ## Crédits et licences
 
 * **FlowFrames** (n00mkrad) — concept et pipeline d'origine, licence GPL.
+* **ncnn** (Tencent) — moteur d'inférence GPU/CPU, licence BSD-3.
+* **rife-ncnn-vulkan** (nihui, modèles v4.x par TNTwise) — couche Warp et modèles ncnn, licence MIT.
 * **RIFE / Practical-RIFE** (hzwer et al.) — réseau d'interpolation, licence MIT.
 * Exports ONNX utilisés : `yuvraj108c/rife-onnx` et `ChimairrA/rife49_ensemble_False_scale_1_sim`
   (Hugging Face, licence MIT), conversions du modèle RIFE 4.9 de `hzwer/ECCV2022-RIFE`.

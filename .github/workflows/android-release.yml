@@ -1,0 +1,71 @@
+name: Android APK release
+
+on:
+  push:
+    tags: ['android-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install NDK r30 and CMake (SDK preinstalled on the runner)
+        run: |
+          SDKM=$(ls -d $ANDROID_HOME/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)
+          yes | $SDKM --licenses > /dev/null || true
+          $SDKM "ndk;30.0.16248370" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0" > /dev/null
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+      - name: Release signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > release.jks
+            printf 'storeFile=../release.jks\nstorePassword=%s\nkeyAlias=flowframes\nkeyPassword=%s\n' \
+              "$KEYSTORE_PASSWORD" "$KEYSTORE_PASSWORD" > keystore.properties
+          else
+            echo "No release key secret: the APK is signed with the debug key"
+          fi
+      - name: Build release APK
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease
+          cp app/build/outputs/apk/release/app-release.apk FlowFrames-Android.apk
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          if [ -f keystore.properties ]; then
+            # Gradle drops the v1 (JAR) signature when minSdk >= 24, but some installers (Honor
+            # MagicOS) only read v1 and refuse the APK ("does not contain any certificates").
+            # Re-sign with v1 + v2 + v3.
+            PW=$(grep '^storePassword=' keystore.properties | cut -d= -f2-)
+            $BT/zipalign -f -p 4 FlowFrames-Android.apk aligned.apk
+            $BT/apksigner sign --ks release.jks --ks-pass "pass:$PW" --ks-key-alias flowframes \
+              --key-pass "pass:$PW" --min-sdk-version 21 --v1-signing-enabled true \
+              --v2-signing-enabled true --v3-signing-enabled true --out FlowFrames-Android.apk aligned.apk
+            rm -f aligned.apk FlowFrames-Android.apk.idsig
+          fi
+          $BT/apksigner verify --verbose --print-certs --min-sdk-version 21 FlowFrames-Android.apk | head -8
+          $BT/apksigner verify --min-sdk-version 21 -v FlowFrames-Android.apk | grep -q "v1 scheme (JAR signing): true" || [ ! -f keystore.properties ]
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FlowFrames-Android-apk
+          path: android/FlowFrames-Android.apk
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: android/FlowFrames-Android.apk
+          prerelease: true
+          name: FlowFrames Android ${{ github.ref_name }}
+          body: "APK arm64 : RIFE sur le GPU via ncnn + Vulkan, repli automatique sur CPU. Signé (v1 + v2 + v3, compatible avec l'installateur Honor) avec la clé de release FlowFrames : inutile de le re-signer. Désinstaller une fois l'ancienne version si l'installation est refusée (clé différente)."

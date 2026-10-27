@@ -32,8 +32,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.flowframes.android.job.AppGraph
+import com.flowframes.android.ui.BenchmarkLiveDialog
 import com.flowframes.android.core.RifeEngine
 import com.flowframes.android.job.EngineBenchmark
+import com.flowframes.android.job.EngineKind
 import com.flowframes.android.job.InterpolationService
 import com.flowframes.android.job.JobItem
 import com.flowframes.android.ui.FlowFramesTheme
@@ -67,6 +69,7 @@ class MainActivity : ComponentActivity() {
         val benchmarkRunning by AppGraph.jobs.benchmarkRunning.collectAsState()
         val scope = rememberCoroutineScope()
         var showSettings by remember { mutableStateOf(false) }
+        var showBenchLive by remember { mutableStateOf(false) }
 
         val copyLogs: () -> Unit = {
             val text = AppGraph.jobs.logText()
@@ -76,7 +79,8 @@ class MainActivity : ComponentActivity() {
         }
 
         val shareLogs: () -> Unit = {
-            val text = AppGraph.jobs.logText().ifEmpty { "FlowFrames: log is empty" }
+            // A share intent over ~500 kB fails (binder limit): the most recent part is what matters.
+            val text = AppGraph.jobs.logText().ifEmpty { "FlowFrames: log is empty" }.takeLast(200_000)
             val send = Intent(Intent.ACTION_SEND).apply {
                 type = "text/plain"
                 putExtra(Intent.EXTRA_SUBJECT, "FlowFrames Android logs")
@@ -89,6 +93,7 @@ class MainActivity : ComponentActivity() {
             if (!benchmarkRunning && !running) {
                 AppGraph.jobs.benchmarkRunning.value = true
                 AppGraph.jobs.addLog("▶ Engine benchmark started")
+                showBenchLive = true
                 scope.launch {
                     val result = withContext(Dispatchers.Default) {
                         runCatching {
@@ -98,6 +103,8 @@ class MainActivity : ComponentActivity() {
                                 report = { line -> AppGraph.jobs.addLog(line) }
                             )
                         }.getOrElse { t ->
+                            AppGraph.jobs.addLog("Benchmark failed:")
+                            AppGraph.jobs.addLines(com.flowframes.android.core.CrashLog.stackTrace(t))
                             EngineBenchmark.Report(
                                 "=== FLOWFRAMES ENGINE BENCHMARK ===\n" +
                                     "Benchmark failed: ${t.message ?: t.javaClass.simpleName}",
@@ -182,6 +189,10 @@ class MainActivity : ComponentActivity() {
             )
         }
 
+        if (benchmarkRunning && showBenchLive) {
+            BenchmarkLiveDialog(logs, onHide = { showBenchLive = false }, onCopy = copyLogs)
+        }
+
         benchmark?.let { report ->
             AlertDialog(
                 onDismissRequest = { AppGraph.jobs.setBenchmark(null, null) },
@@ -199,9 +210,19 @@ class MainActivity : ComponentActivity() {
                         benchmarkBest?.let { best ->
                             TextButton(onClick = {
                                 AppGraph.settings.update { s ->
+                                    val gpu = best.engine == EngineKind.NCNN_GPU
                                     s.copy(
+                                        // The GPU winner keeps "automatic": the job re-checks Vulkan at
+                                        // every start and falls back to the CPU on a broken driver.
+                                        engine = if (gpu) EngineKind.NCNN_GPU else best.engine,
+                                        ncnnModel = best.ncnnModel,
+                                        fp16 = best.fp16,
+                                        coopMatrix = best.coopMatrix,
+                                        cpuAssist = gpu && best.cpuWorkers > 0,
+                                        cpuAssistWorkers = if (best.cpuWorkers > 0) best.cpuWorkers else s.cpuAssistWorkers,
+                                        cpuAssistThreads = if (best.cpuWorkers > 0) best.cpuThreads else s.cpuAssistThreads,
                                         // 0 keeps "automatic", so a later CPU change still adapts.
-                                        threads = if (best.totalThreads == RifeEngine.defaultThreads()) 0 else best.totalThreads,
+                                        threads = if (gpu || best.totalThreads == RifeEngine.defaultThreads()) 0 else best.totalThreads,
                                         workers = best.workers,
                                         useXnnpack = best.useXnnpack,
                                         parallelOps = best.parallelOps,

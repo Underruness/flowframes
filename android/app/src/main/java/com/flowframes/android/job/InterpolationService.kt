@@ -68,7 +68,10 @@ class InterpolationService : Service() {
             while (true) {
                 if (AppGraph.jobs.cancelRequested) break
                 val next = AppGraph.jobs.nextQueued() ?: break
-                AppGraph.jobs.update(next.id) { it.copy(status = JobStatus.RUNNING, progress = 0f, error = null) }
+                AppGraph.jobs.update(next.id) { it.copy(status = JobStatus.RUNNING, progress = 0f, error = null, startedAtMs = System.currentTimeMillis(), finishedAtMs = 0L) }
+                val startedAt = System.currentTimeMillis()
+                var etaFrom: Pair<Long, Float>? = null
+                fun took() = formatClock(System.currentTimeMillis() - startedAt)
                 notifyProgress(next.displayName, 0)
                 AppGraph.jobs.addLog("▶ ${next.displayName}")
 
@@ -81,16 +84,22 @@ class InterpolationService : Service() {
                             AppGraph.jobs.update(next.id) {
                                 it.copy(progress = progress.coerceIn(0f, 1f), detail = detail)
                             }
-                            notifyProgress("${next.displayName} · $detail", (progress * 100).toInt())
+                            val now = System.currentTimeMillis()
+                            if (etaFrom == null && progress > 0f) etaFrom = now to progress
+                            val eta = etaFrom?.let { estimateRemainingMs(now, it.first, it.second, progress) }
+                            val clock = formatClock(now - startedAt) + (eta?.let { " · ETA " + formatClock(it) } ?: "")
+                            notifyProgress("${next.displayName} · $clock · $detail", (progress * 100).toInt())
                         },
                         isCancelled = { AppGraph.jobs.cancelRequested }
                     )
                     val result = job.process(next.uri, next.displayName)
+                    AppGraph.jobs.addLog("✔ ${next.displayName}: finished in ${took()}")
                     AppGraph.jobs.update(next.id) {
                         it.copy(
+                            finishedAtMs = System.currentTimeMillis(),
                             status = JobStatus.DONE,
                             progress = 1f,
-                            detail = "${result.frames} frames → ${result.label}",
+                            detail = "Finished in ${took()} · ${result.frames} frames",
                             outputName = result.label,
                             outputLabel = result.path ?: result.uri.toString()
                         )
@@ -98,20 +107,20 @@ class InterpolationService : Service() {
                     completed++
                 } catch (cancelled: JobCancelledException) {
                     AppGraph.jobs.update(next.id) {
-                        it.copy(status = JobStatus.CANCELLED, detail = "Cancelled", progress = 0f)
+                        it.copy(status = JobStatus.CANCELLED, detail = "Cancelled after ${took()}", progress = 0f, finishedAtMs = System.currentTimeMillis())
                     }
                     AppGraph.jobs.addLog("■ ${next.displayName} cancelled")
                     break
                 } catch (oom: OutOfMemoryError) {
-                    val message = "Out of memory — lower the processing resolution (for example 720p or 480p) in Settings"
+                    val message = "Out of memory (Java heap ${Runtime.getRuntime().maxMemory() / (1024 * 1024)} MB) — lower the processing resolution or use x2 at 4K"
                     AppGraph.jobs.update(next.id) {
-                        it.copy(status = JobStatus.FAILED, error = message, detail = "Failed")
+                        it.copy(status = JobStatus.FAILED, error = message, detail = "Failed after ${took()}", finishedAtMs = System.currentTimeMillis())
                     }
                     AppGraph.jobs.addLog("✖ ${next.displayName}: $message")
                 } catch (t: Throwable) {
                     val message = t.message ?: t.javaClass.simpleName
                     AppGraph.jobs.update(next.id) {
-                        it.copy(status = JobStatus.FAILED, error = message, detail = "Failed")
+                        it.copy(status = JobStatus.FAILED, error = message, detail = "Failed after ${took()}", finishedAtMs = System.currentTimeMillis())
                     }
                     AppGraph.jobs.addLog("✖ ${next.displayName}: $message")
                 }

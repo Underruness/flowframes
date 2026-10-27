@@ -29,14 +29,24 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import android.widget.Toast
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.flowframes.android.core.Naming
 import com.flowframes.android.job.AiQuality
+import com.flowframes.android.job.EngineKind
+import com.flowframes.android.job.NcnnModel
 import com.flowframes.android.job.OutputCodec
 import com.flowframes.android.job.Settings
 import java.util.Locale
@@ -75,18 +85,88 @@ fun SettingsScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
+            Section("Display") {
+                SwitchRow(
+                    title = "Advanced view",
+                    description = "Shows the CPU and ONNX Runtime engine options, the detailed RAM split and every " +
+                        "temperature (CPU, GPU, NPU). Off: only the frame rate, resolution, GPU and output settings, " +
+                        "phone RAM and battery temperature.",
+                    checked = settings.advanced,
+                    onCheckedChange = { v -> onChange { s -> s.copy(advanced = v) } }
+                )
+            }
+
             Section("Interpolation") {
-                Text("Multiplier", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Text("Output rate", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                val targetMode = settings.targetFps > 0.0
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(2, 3, 4, 6, 8).forEach { f ->
-                        FilterChip(
-                            selected = settings.factor == f,
-                            onClick = { onChange { s -> s.copy(factor = f) } },
-                            label = { Text("x$f") }
-                        )
-                    }
+                    FilterChip(
+                        selected = !targetMode,
+                        onClick = { onChange { s -> s.copy(targetFps = 0.0) } },
+                        label = { Text("Multiplier") }
+                    )
+                    FilterChip(
+                        selected = targetMode,
+                        onClick = { onChange { s -> s.copy(targetFps = if (s.targetFps > 0.0) s.targetFps else 60.0) } },
+                        label = { Text("Exact fps") }
+                    )
                 }
-                Caption("Each step adds ${settings.factor - 1} interpolated frame(s) between two source frames.")
+                if (!targetMode) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(2, 3, 4, 6, 8).forEach { f ->
+                            FilterChip(
+                                selected = settings.factor == f,
+                                onClick = { onChange { s -> s.copy(factor = f) } },
+                                label = { Text("x$f") }
+                            )
+                        }
+                    }
+                    Caption("Each step adds ${settings.factor - 1} interpolated frame(s) between two source frames.")
+                } else {
+                    var fpsText by remember(targetMode) { mutableStateOf(fpsLabel(settings.targetFps)) }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(30.0, 48.0, 60.0, 90.0).forEach { f ->
+                            FilterChip(
+                                selected = settings.targetFps == f,
+                                onClick = {
+                                    fpsText = fpsLabel(f)
+                                    onChange { s -> s.copy(targetFps = f) }
+                                },
+                                label = { Text(String.format(Locale.US, "%.0f", f)) }
+                            )
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(120.0, 144.0, 165.0, 240.0).forEach { f ->
+                            FilterChip(
+                                selected = settings.targetFps == f,
+                                onClick = {
+                                    fpsText = fpsLabel(f)
+                                    onChange { s -> s.copy(targetFps = f) }
+                                },
+                                label = { Text(String.format(Locale.US, "%.0f", f)) }
+                            )
+                        }
+                    }
+                    OutlinedTextField(
+                        value = fpsText,
+                        onValueChange = { v ->
+                            fpsText = v
+                            v.replace(',', '.').toDoubleOrNull()?.takeIf { it in 1.0..480.0 }?.let { fps ->
+                                onChange { s -> s.copy(targetFps = fps) }
+                            }
+                        },
+                        label = { Text("Output fps (1–480, e.g. 59.94)") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Caption(
+                        "The output gets exactly this frame rate whatever the source is: 24 → 60 fps interpolates " +
+                            "frames at fractional positions (x2.5). Frames that fall on a source frame reuse it, " +
+                            "so they cost nothing. The output fps limit below does not apply in this mode."
+                    )
+                }
 
                 Spacer(Modifier.height(4.dp))
                 Text("Processing resolution", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
@@ -100,7 +180,7 @@ fun SettingsScreen(
                     }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(2560 to "1440p", 0 to "Source").forEach { (v, label) ->
+                    listOf(2560 to "1440p", 3840 to "4K", 0 to "Source").forEach { (v, label) ->
                         FilterChip(
                             selected = settings.maxLongSide == v,
                             onClick = { onChange { s -> s.copy(maxLongSide = v) } },
@@ -109,12 +189,91 @@ fun SettingsScreen(
                     }
                 }
                 Caption(
-                    "Higher resolutions look better but cost time and RAM roughly with the pixel count. " +
+                    "Higher resolutions look better but cost time and RAM roughly with the pixel count (1440p = 1.8×, 4K = 4× the 1080p time). " +
                         "Each frame costs about (width × height) / 330 000 × the per-frame time shown by the benchmark."
                 )
             }
 
-            Section("AI engine") {
+            Section(if (settings.advanced) "AI engine" else "GPU") {
+                if (settings.advanced) {
+                Text("Runtime", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(EngineKind.AUTO to "Auto", EngineKind.NCNN_GPU to "GPU").forEach { (k, label) ->
+                        FilterChip(
+                            selected = settings.engine == k,
+                            onClick = { onChange { s -> s.copy(engine = k) } },
+                            label = { Text(label) }
+                        )
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(EngineKind.NCNN_CPU to "CPU (ncnn)", EngineKind.ORT_CPU to "CPU (ONNX)").forEach { (k, label) ->
+                        FilterChip(
+                            selected = settings.engine == k,
+                            onClick = { onChange { s -> s.copy(engine = k) } },
+                            label = { Text(label) }
+                        )
+                    }
+                }
+                Caption(
+                    "Auto runs RIFE on the GPU through Vulkan (ncnn, the engine of FlowFrames on PC) after a " +
+                        "self-test at the job's resolution, and falls back to the CPU if the driver fails it. " +
+                        "The old ONNX Runtime CPU engine stays available for comparison."
+                )
+                } else if (settings.engine != EngineKind.NCNN_GPU && settings.engine != EngineKind.AUTO) {
+                    Caption("The engine is set to ${settings.engine.label} (advanced view).")
+                }
+
+                Text("ncnn model", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    NcnnModel.values().forEach { m ->
+                        FilterChip(
+                            selected = settings.ncnnModel == m,
+                            onClick = { onChange { s -> s.copy(ncnnModel = m) } },
+                            label = { Text(m.label) }
+                        )
+                    }
+                }
+                Caption("RIFE 4.6 is about 20% faster on the GPU; 4.9 gives slightly different (often cleaner) results.")
+
+                SwitchRow(
+                    title = "fp16 arithmetic (ncnn, experimental)",
+                    description = "Half-precision math in the network. Off by default: on a Snapdragon 8 Elite it " +
+                        "hung the GPU. Results stay invisible (50 dB) where it works; a hang is now detected " +
+                        "and the job falls back to the CPU.",
+                    checked = settings.fp16,
+                    onCheckedChange = { v -> onChange { s -> s.copy(fp16 = v) } }
+                )
+                SwitchRow(
+                    title = "Cooperative matrix (experimental)",
+                    description = "ncnn's tensor-core kernels for fp16 math (Adreno 8xx). The likely cause of the " +
+                        "fp16 hang; only used together with fp16 arithmetic.",
+                    checked = settings.coopMatrix,
+                    onCheckedChange = { v -> onChange { s -> s.copy(coopMatrix = v) } }
+                )
+                ParallelInferences(settings, onChange)
+
+                if (settings.advanced) {
+                SwitchRow(
+                    title = "CPU assist (hybrid GPU + CPU)",
+                    description = "CPU workers take interpolations from the same queue as the GPU. Gains when the " +
+                        "CPU is idle; can lose if the phone throttles. Run the benchmark to compare.",
+                    checked = settings.cpuAssist,
+                    onCheckedChange = { v -> onChange { s -> s.copy(cpuAssist = v) } }
+                )
+                if (settings.cpuAssist) {
+                    Text("CPU assist workers", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(1 to 4, 1 to 6, 2 to 3).forEach { (w, t) ->
+                            FilterChip(
+                                selected = settings.cpuAssistWorkers == w && settings.cpuAssistThreads == t,
+                                onClick = { onChange { s -> s.copy(cpuAssistWorkers = w, cpuAssistThreads = t) } },
+                                label = { Text("$w × ${t}T") }
+                            )
+                        }
+                    }
+                }
+
                 Text("Model quality", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(
@@ -128,7 +287,9 @@ fun SettingsScreen(
                         label = { Text("High quality") }
                     )
                 }
-                Caption("\"High quality\" runs RIFE in ensemble mode: fewer artefacts, roughly twice as slow.")
+                Caption("\"High quality\" runs RIFE in ensemble mode: fewer artefacts, roughly twice as slow, CPU only (ONNX Runtime).")
+
+                Text("ONNX Runtime options", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
 
                 SwitchRow(
                     title = "XNNPACK provider",
@@ -171,25 +332,7 @@ fun SettingsScreen(
                         "core measured 25-30% slower on a real job, even though it looks slightly faster in a short test."
                 )
 
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "Parallel inferences: " +
-                        if (settings.workers == 0) "automatic" else "${settings.workers} at a time",
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 13.sp
-                )
-                Slider(
-                    value = settings.workers.toFloat(),
-                    onValueChange = { v -> onChange { s -> s.copy(workers = v.toInt()) } },
-                    valueRange = 0f..4f,
-                    steps = 3
-                )
-                Caption(
-                    "One inference cannot keep eight cores busy: the threads spend their time waiting on memory. " +
-                        "Running several at once filled the cores and measured 2.1× the throughput with the same output " +
-                        "(125 ms against 259 ms per frame). Each parallel inference loads its own copy of the model, so raise " +
-                        "this only if the benchmark wins with the extra memory."
-                )
+                }
             }
 
             Section("Output video") {
@@ -260,7 +403,7 @@ fun SettingsScreen(
                 }
             }
 
-            Section("2D animation and finishing") {
+            if (settings.advanced) Section("2D animation and finishing") {
                 SwitchRow(
                     title = "Frame deduplication",
                     description = "Skips identical frames. Enable for 2D animation, leave off for live-action video.",
@@ -340,6 +483,20 @@ fun SettingsScreen(
                     OutlinedButton(onClick = onCopyLogs) { Text("Copy logs", fontSize = 12.sp) }
                     OutlinedButton(onClick = onShareLogs) { Text("Share logs", fontSize = 12.sp) }
                 }
+                val ctx = LocalContext.current
+                OutlinedButton(onClick = {
+                    Thread {
+                        com.flowframes.android.core.NcnnRifeEngine.clearShaderCaches()
+                        com.flowframes.android.core.CrashLog.resetGpuSafety(ctx)
+                        com.flowframes.android.core.NcnnRifeEngine.setPipelineDiskCache(true)
+                    }.start()
+                    Toast.makeText(ctx, "GPU shader cache cleared: the next GPU run rebuilds it", Toast.LENGTH_SHORT).show()
+                }) { Text("Clear GPU shader cache", fontSize = 12.sp) }
+                Caption(
+                    "Compiled GPU shaders are kept on disk, so the slow first build (up to 1.5 min with fp16 + " +
+                        "coopmat) only happens once per app version or driver update. Clear it only if a GPU " +
+                        "configuration misbehaves after a driver update."
+                )
                 Caption(
                     "Logs include device model, core count, thermal status, engine configuration, per-stage " +
                         "timings, inference latency percentiles with their drift, per-minute progress and a " +
@@ -349,15 +506,15 @@ fun SettingsScreen(
 
             Section("About") {
                 Text(
-                    "FlowFrames Android 1.4.0 — a rewrite of the FlowFrames (Windows) pipeline for Android: " +
-                        "MediaCodec decoding, RIFE 4.9 interpolation through ONNX Runtime, hardware encoding " +
+                    "FlowFrames Android 1.6.4 — a rewrite of the FlowFrames (Windows) pipeline for Android: " +
+                        "MediaCodec decoding, RIFE interpolation on the GPU (ncnn Vulkan) or the CPU, hardware encoding " +
                         "and MP4 muxing.",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "RIFE 4.9 models (MIT) · everything runs locally, nothing is uploaded.",
+                    "RIFE 4.9 / 4.6 models (MIT) · ncnn (BSD-3) · everything runs locally, nothing is uploaded.",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -399,4 +556,41 @@ private fun SwitchRow(
         Spacer(Modifier.width(8.dp))
         Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
+}
+
+private fun fpsLabel(fps: Double): String =
+    if (fps % 1.0 == 0.0) String.format(Locale.US, "%.0f", fps)
+    else String.format(Locale.US, "%.3f", fps).trimEnd('0').trimEnd('.')
+
+/** Off / 1-4 / Auto. "Off" runs one pair at a time with nothing overlapping, to measure the gain. */
+@Composable
+private fun ParallelInferences(settings: Settings, onChange: ((Settings) -> Settings) -> Unit) {
+    Text(
+        "Parallel inferences: " + when {
+            settings.workers == Settings.WORKERS_OFF -> "off"
+            settings.workers == Settings.WORKERS_AUTO -> "automatic (2 on the GPU)"
+            else -> "${settings.workers} at a time"
+        },
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 13.sp
+    )
+    listOf(
+        listOf(Settings.WORKERS_OFF to "Off", 1 to "1", 2 to "2"),
+        listOf(3 to "3", 4 to "4", Settings.WORKERS_AUTO to "Auto")
+    ).forEach { row ->
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            row.forEach { (v, label) ->
+                FilterChip(
+                    selected = settings.workers == v,
+                    onClick = { onChange { s -> s.copy(workers = v) } },
+                    label = { Text(label) }
+                )
+            }
+        }
+    }
+    Caption(
+        "Off: one inference at a time and the next frames are only read once the previous ones are " +
+            "encoded, nothing overlaps. 1: one inference at a time, but decoding and encoding overlap it. " +
+            "2 or more: several inferences in flight, each with its own copy of the model (more memory)."
+    )
 }

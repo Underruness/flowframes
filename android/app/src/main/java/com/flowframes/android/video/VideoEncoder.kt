@@ -189,12 +189,20 @@ class VideoEncoder(
         val py = planes[0]
         val pu = planes[1]
         val pv = planes[2]
-        YuvConverter.argbToYuv420(
+        val native = com.flowframes.android.core.NativeFrames.argbToYuv420(
             argb, width, height,
             py.buffer, pu.buffer, pv.buffer,
             py.rowStride, pu.rowStride, pu.pixelStride,
             spec
         )
+        if (!native) {
+            YuvConverter.argbToYuv420(
+                argb, width, height,
+                py.buffer, pu.buffer, pv.buffer,
+                py.rowStride, pu.rowStride, pu.pixelStride,
+                spec
+            )
+        }
         padImage(image)
     }
 
