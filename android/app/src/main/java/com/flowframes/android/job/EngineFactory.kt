@@ -102,7 +102,21 @@ object EngineFactory {
                 choice = choice.copy(workers = 1)
                 log("Resolution above 1440p: 1 GPU session to save memory")
             }
-            val pool = runCatching { create(context, settings, choice, width, height, log) }
+            val gpu = kind == EngineKind.NCNN_GPU
+            val slowBuild = gpu && settings.fp16 && settings.coopMatrix
+            if (slowBuild) {
+                log("GPU engine: fp16 + coopmat, the first build compiles every pipeline (about 1.5 min on an Adreno 840, cached afterwards)…")
+            }
+            val c = choice
+            val pool = runCatching {
+                if (gpu) {
+                    withHeartbeat("building the GPU engine", log) {
+                        createWithTimeout(if (slowBuild) GPU_BUILD_COOP_TIMEOUT_S else GPU_BUILD_TIMEOUT_S) {
+                            create(context, settings, c, width, height, log)
+                        }
+                    }
+                } else create(context, settings, c, width, height, log)
+            }
                 .getOrElse { t ->
                     val reason = t.message ?: t.javaClass.simpleName
                     failures += "${kind.label}: $reason"
@@ -113,7 +127,8 @@ object EngineFactory {
                 // fp16 + coopmat pipelines took 98 s to build on an Adreno 840: slow, not hung.
                 val timeout = if (kind == EngineKind.NCNN_GPU && settings.fp16 && settings.coopMatrix) 240L else SELF_TEST_TIMEOUT_S
                 if (timeout > SELF_TEST_TIMEOUT_S) log("Engine self-test: fp16 + coopmat, the first GPU pipeline build can take up to 2 min…")
-                pool.distinctEngines.minOf { engine -> selfTestWithTimeout(engine, width, height, timeout) }
+                val test = { pool.distinctEngines.minOf { engine -> selfTestWithTimeout(engine, width, height, timeout) } }
+                if (gpu) withHeartbeat("GPU self-test (first frame)", log, test) else test()
             }
             val db = verdict.getOrNull()
             if (db != null && db >= SELF_TEST_MIN_DB) {
@@ -131,6 +146,58 @@ object EngineFactory {
             if (verdict.exceptionOrNull() !is java.util.concurrent.TimeoutException) runCatching { pool.close() }
         }
         throw IllegalStateException("No inference engine works on this device: ${failures.joinToString(" · ")}")
+    }
+
+    private const val GPU_BUILD_TIMEOUT_S = 150L
+    private const val GPU_BUILD_COOP_TIMEOUT_S = 300L
+
+    /**
+     * Logs every 15 s while [block] runs: elapsed time, what native code is doing and how many
+     * shaders/pipelines are built, so a slow GPU build is visibly progressing (or visibly stuck).
+     */
+    fun <T> withHeartbeat(what: String, log: (String) -> Unit, block: () -> T): T {
+        val start = System.nanoTime()
+        val done = java.util.concurrent.CountDownLatch(1)
+        val ticker = Thread({
+            while (!done.await(15, java.util.concurrent.TimeUnit.SECONDS)) {
+                val s = (System.nanoTime() - start) / 1_000_000_000
+                val stage = NcnnRifeEngine.nativeStageNow().ifBlank { "?" }
+                log("    … $what: $s s · native: $stage · ${NcnnRifeEngine.shaderCacheStats().substringBefore(" · cache files")}")
+            }
+        }, "engine-heartbeat").apply { isDaemon = true }
+        ticker.start()
+        try {
+            return block()
+        } finally {
+            done.countDown()
+        }
+    }
+
+    /**
+     * A GPU engine build that never ends (driver stuck compiling a pipeline) must not block the
+     * job forever: after [timeoutS] the GPU is given up for this session and the next engine is
+     * tried. The stuck native call is left running (it cannot be interrupted safely).
+     */
+    private fun <T> createWithTimeout(timeoutS: Long, block: () -> T): T {
+        val executor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "gpu-engine-build").apply { isDaemon = true }
+        }
+        try {
+            val future = executor.submit<T> { block() }
+            return try {
+                future.get(timeoutS, java.util.concurrent.TimeUnit.SECONDS)
+            } catch (e: java.util.concurrent.TimeoutException) {
+                markGpuHung()
+                throw java.util.concurrent.TimeoutException(
+                    "GPU engine build still running after $timeoutS s (native: ${NcnnRifeEngine.nativeStageNow()}) — " +
+                        "GPU skipped for this session; turn off cooperative matrix if this repeats"
+                )
+            } catch (e: java.util.concurrent.ExecutionException) {
+                throw e.cause ?: e
+            }
+        } finally {
+            executor.shutdown()
+        }
     }
 
     /** Builds a pool without the self-test (the benchmark measures failures itself). */

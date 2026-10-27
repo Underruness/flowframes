@@ -520,6 +520,20 @@ Mesures de la 1.5.1 sur Adreno 840, canevas de 1920x1088, en ms par inférence :
   (la 1.6.0 affichait 105 °C à cause de l'une d'elles). Les valeurs de tous les capteurs sont
   écrites dans le log.
 
+### Version 1.6.2 — crash OpenMP et construction GPU visible
+
+- **Crash du benchmark identifié** grâce au rapport natif de la 1.6.1 : `SIGABRT` dans le runtime
+  OpenMP (`__kmp_affinity_initialize`) pendant la conversion fp16 des poids de ncnn
+  (`Net::load_model` → `Cast_arm::forward`). L'initialisation de l'affinité CPU d'OpenMP échoue sur
+  ce téléphone ; elle est désactivée (`KMP_AFFINITY=disabled`, `OMP_PROC_BIND=false`) avant le
+  premier usage d'OpenMP. ncnn gère lui-même ses threads.
+- **Cache de pipelines réactivé** : la 1.6.1 l'avait coupé à tort après ce crash ; il n'est
+  maintenant désactivé que si le crash a lieu dans le code du cache lui-même.
+- **Construction du moteur GPU visible dans les travaux** : une ligne toutes les 15 s avec le
+  temps écoulé, l'étape native en cours et le nombre de shaders / pipelines construits, et une
+  limite (150 s, 300 s en fp16 + coopmat) au-delà de laquelle le GPU est abandonné pour la session
+  au lieu de bloquer le travail.
+
 ## Limites connues
 
 * Sortie **MP4 uniquement** (H.264 ou HEVC), pas de GIF/PNG/MKV.

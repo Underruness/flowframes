@@ -127,7 +127,7 @@ object EngineBenchmark {
                         onTimeout()
                         throw e
                     }
-                    report("    … ${elapsed} s / ${seconds} s max · ${progress.describe()}")
+                    report("    … ${elapsed} s / ${seconds} s max · ${progress.describe()}" + NcnnRifeEngine.nativeStageNow().takeIf { it.isNotBlank() && it != "idle" }?.let { " · native: $it" }.orEmpty())
                 }
             }
         } catch (e: java.util.concurrent.ExecutionException) {

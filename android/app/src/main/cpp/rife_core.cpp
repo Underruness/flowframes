@@ -194,6 +194,7 @@ int RifeCore::run(const ncnn::Mat& in0, const ncnn::Mat& in1, int width, int hei
         if (ex.input("in2", ts) != 0) return -2;
         setStage(vkdev ? "ncnn extract (GPU inference)" : "ncnn extract (CPU inference)");
         int ret = ex.extract("out0", result);
+        setStage("idle");
         if (ret != 0) return -3;
     }
     if (result.empty() || result.c != 3 || result.w < width || result.h < height) return -4;

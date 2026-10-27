@@ -13,6 +13,9 @@ void installCrashHandler(const char* reportPath);
 // Breadcrumb: a static string naming what native code is doing now (shown in the report).
 void setStage(const char* stage);
 
+// Current breadcrumb (for the live job log while an engine builds).
+const char* currentStage();
+
 } // namespace flowframes
 
 #endif

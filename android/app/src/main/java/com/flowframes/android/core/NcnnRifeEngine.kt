@@ -125,6 +125,10 @@ class NcnnRifeEngine(
             if (isAvailable) runCatching { nativeSetPipelineDiskCache(enabled) }
         }
 
+        /** What native code is doing right now (model load, pipeline build, inference…). */
+        fun nativeStageNow(): String = if (isAvailable) runCatching { nativeStage() }.getOrDefault("") else ""
+
+        @JvmStatic private external fun nativeStage(): String
         @JvmStatic private external fun nativeInstallCrashHandler(path: String)
         @JvmStatic private external fun nativeSetPipelineDiskCache(enabled: Boolean)
         @JvmStatic private external fun nativeGpuCount(): Int

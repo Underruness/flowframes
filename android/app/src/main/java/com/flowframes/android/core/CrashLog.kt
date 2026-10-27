@@ -60,21 +60,33 @@ object CrashLog {
             prefs.edit().putLong("lastExitTs", ts).apply()
             if (text.isNotBlank()) report.appendLine(text)
         }
+        // 1.6.1 turned the pipeline cache off after an OpenMP abort that had nothing to do with it.
+        if (prefs.getInt("safetyVersion", 0) < 2) {
+            prefs.edit().putBoolean("pipelineDiskOff", false).putInt("safetyVersion", 2).apply()
+        }
         val native = File(logs, "native-crash.txt")
+        var nativeStage = ""
         if (native.exists()) {
+            val text = runCatching { native.readText().trim() }.getOrDefault("(unreadable)")
+            nativeStage = text.lines().firstOrNull { it.startsWith("Native stage:") } ?: ""
             report.appendLine("--- native crash report ---")
-            report.appendLine(runCatching { native.readText().trim() }.getOrDefault("(unreadable)"))
+            report.appendLine(text)
             native.renameTo(File(logs, "native-crash-previous.txt"))
         }
         val marker = File(logs, "gpu-build.marker")
         if (marker.exists()) {
             val what = runCatching { marker.readText().trim() }.getOrDefault("")
-            report.appendLine(
-                "The previous session died during a GPU engine build ($what). The driver pipeline " +
-                    "cache on disk is turned off for safety (Settings → Clear GPU shader cache turns it back on)."
-            )
             marker.delete()
-            prefs.edit().putBoolean("pipelineDiskOff", true).apply()
+            // Only a crash inside the cache code itself disables the cache.
+            if (nativeStage.contains("pipeline cache")) {
+                report.appendLine(
+                    "The previous session died while the GPU driver read or merged its pipeline cache ($what). " +
+                        "That cache is turned off for safety (Settings → Clear GPU shader cache turns it back on)."
+                )
+                prefs.edit().putBoolean("pipelineDiskOff", true).apply()
+            } else {
+                report.appendLine("The previous session died during a GPU engine build ($what).")
+            }
         }
         gpuBuildCrashed = prefs.getBoolean("pipelineDiskOff", false)
         if (report.isNotEmpty() && previous.exists()) {
@@ -179,24 +191,31 @@ object CrashLog {
                 } else {
                     // Native crash: a tombstone protobuf; its text fields (signal, libraries,
                     // function names, abort message) are readable as plain strings.
-                    sb.appendLine("--- tombstone (text fields) ---")
-                    printableStrings(trace).take(120).forEach { sb.appendLine(it) }
+                    sb.appendLine("--- tombstone (crashing thread, abort message) ---")
+                    printableStrings(trace).take(40).forEach { sb.appendLine(it) }
                 }
             }
         }
         onReport(last.timestamp, if (normal) "" else sb.toString().trim())
     }
 
-    private fun printableStrings(bytes: ByteArray, min: Int = 6): List<String> {
+    /**
+     * The useful part of a tombstone protobuf: its first strings (signal, crashing thread, abort
+     * message such as "OMP: Error #13 …") up to the end of the crashing thread's backtrace, i.e.
+     * before the other threads and the memory map, which only add noise.
+     */
+    private fun printableStrings(bytes: ByteArray, min: Int = 5): List<String> {
         val result = ArrayList<String>()
         val cur = StringBuilder()
+        var done = false
         fun flush() {
-            if (cur.length >= min) {
-                val s = cur.toString()
-                if (s.contains(".so") || s.contains("::") || s.contains("SIG") || s.contains("abort") ||
-                    s.contains("Abort") || s.contains("vk") || s.contains("ncnn") || s.contains("Thread") ||
-                    s.contains("Fatal") || s.contains("signal") || s.contains("Cause") || result.size < 10
-                ) result += s
+            if (!done && cur.length >= min) {
+                val s = cur.toString().trim()
+                if (s.contains("ThreadPoolExecutor.runWorker") || s.contains("__start_thread")) done = true
+                val keep = result.size < 8 || s.contains("libflowframes") || s.contains("OMP") ||
+                    s.contains("rror") || s.contains("ssert") || s.contains("abort") || s.contains("SIG") ||
+                    s.contains("ncnn") || s.contains("kmp") || s.contains("vk") || s.contains("adreno")
+                if (keep) result += s
             }
             cur.setLength(0)
         }

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -138,6 +139,20 @@ void installCrashHandler(const char* reportPath) {
         sigemptyset(&sa.sa_mask);
         sigaction(sig, &sa, &g_old[sig]);
     }
+}
+
+const char* currentStage() {
+    return g_stage.load();
+}
+
+// libomp (statically linked through ncnn) aborted on an Honor / Android 17 phone while building
+// its CPU affinity topology ("__kmp_affinity_initialize" → abort, first parallel region of the
+// process, inside ncnn's fp16 weight conversion). ncnn pins its own threads when it wants to, so
+// OpenMP's affinity layer is switched off before the runtime reads its environment.
+__attribute__((constructor(101))) static void ffOpenMpEnv() {
+    setenv("KMP_AFFINITY", "disabled", 1);
+    setenv("OMP_PROC_BIND", "false", 1);
+    setenv("KMP_WARNINGS", "0", 0);
 }
 
 void setStage(const char* stage) {

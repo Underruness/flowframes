@@ -170,6 +170,11 @@ Java_com_flowframes_android_core_NcnnRifeEngine_nativeInstallCrashHandler(JNIEnv
     flowframes::installCrashHandler(p.c_str());
 }
 
+JNIEXPORT jstring JNICALL
+Java_com_flowframes_android_core_NcnnRifeEngine_nativeStage(JNIEnv* env, jclass) {
+    return env->NewStringUTF(flowframes::currentStage());
+}
+
 JNIEXPORT void JNICALL
 Java_com_flowframes_android_core_NcnnRifeEngine_nativeSetPipelineDiskCache(JNIEnv*, jclass, jboolean on) {
     flowframes::setPipelineDiskCache(on == JNI_TRUE);

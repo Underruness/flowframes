@@ -269,6 +269,7 @@ void savePipelinesLocked() {
         }
     }
     g_origDestroyCache(device, merged, nullptr);
+    setStage("idle");
 }
 
 // ncnn creates its caches empty; they get the blob saved by the previous run instead.
@@ -284,8 +285,10 @@ VKAPI_ATTR VkResult VKAPI_CALL hookedCreatePipelineCache(
         VkPipelineCacheCreateInfo seeded = *info;
         seeded.initialDataSize = size;
         seeded.pInitialData = data;
+        const char* before = currentStage();
         setStage("GPU driver: loading the saved pipeline cache");
         r = g_origCreateCache(device, &seeded, allocator, out);
+        setStage(before);
         if (r == VK_SUCCESS) {
             g_pipelineFromDisk = true;
             g_pipelineFileBytes = (long long)file.size();
@@ -339,9 +342,11 @@ VKAPI_ATTR VkResult VKAPI_CALL hookedCreateComputePipelines(
     VkDevice device, VkPipelineCache cache, uint32_t count, const VkComputePipelineCreateInfo* infos,
     const VkAllocationCallbacks* allocator, VkPipeline* pipelines) {
     if (cache == VK_NULL_HANDLE) cache = ownCacheFor(device);
+    const char* before = currentStage();
     setStage("GPU driver: building compute pipelines");
     const long long t0 = nowNs();
     VkResult r = g_origCreate(device, cache, count, infos, allocator, pipelines);
+    setStage(before);
     g_pipelineNs += nowNs() - t0;
     g_pipelines += count;
     if (r == VK_SUCCESS && cache != VK_NULL_HANDLE) {
