@@ -48,6 +48,11 @@ object EngineFactory {
         gpuHung = true
     }
 
+    /** A call given up on finally answered: it was slow, not wedged. */
+    fun clearGpuHung() {
+        gpuHung = false
+    }
+
     fun chain(settings: Settings): List<EngineKind> = when {
         // The ensemble ("High quality") weights only exist as an ONNX export.
         settings.quality == AiQuality.HIGH -> listOf(EngineKind.ORT_CPU)
@@ -97,7 +102,10 @@ object EngineFactory {
                     null
                 } ?: continue
             val verdict = runCatching {
-                pool.distinctEngines.minOf { engine -> selfTestWithTimeout(engine, width, height) }
+                // fp16 + coopmat pipelines took 98 s to build on an Adreno 840: slow, not hung.
+                val timeout = if (kind == EngineKind.NCNN_GPU && settings.fp16 && settings.coopMatrix) 240L else SELF_TEST_TIMEOUT_S
+                if (timeout > SELF_TEST_TIMEOUT_S) log("Engine self-test: fp16 + coopmat, the first GPU pipeline build can take up to 2 min…")
+                pool.distinctEngines.minOf { engine -> selfTestWithTimeout(engine, width, height, timeout) }
             }
             val db = verdict.getOrNull()
             if (db != null && db >= SELF_TEST_MIN_DB) {

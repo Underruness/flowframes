@@ -458,6 +458,25 @@ Mesure de la 1.5.0 sur Snapdragon 8 Elite (Adreno 830), 540x540 en x4 : **6 fps 
 - **Mode hybride (« CPU assist »).** Des workers ncnn CPU fp32 puisent dans la même file que les workers GPU. Chaque thread est attaché à un moteur, et la fenêtre d'images en avance est doublée pour que le GPU ne s'arrête pas en attendant une image CPU plus lente. Le journal de la tâche affiche la répartition (« Work split »).
 - **Ordre du benchmark.** Les configurations sûres passent en premier : ONNX, GPU ×1/×2/×3, GPU 4.6, les variantes hybrides (1×4T, 1×6T, 2×3T) et ncnn CPU. Les variantes fp16 passent en dernier. Le débit est mesuré avec toutes les inférences en file en même temps, comme dans une vraie tâche. Le rapport inclut la ligne d'infos Vulkan (pilote, fp16, coopmat).
 
+### Version 1.5.2 — benchmark en direct
+
+Mesures de la 1.5.1 sur Adreno 840, canevas de 1920x1088, en ms par inférence :
+
+| Configuration | ms/inférence | PSNR vs ONNX |
+|---|---|---|
+| ONNX Runtime CPU | 1317 | référence |
+| GPU ×3 | 249 | 73 dB |
+| GPU 4.6 ×2 | 198 | 45 dB |
+| GPU fp16 | 280 | 60 dB |
+| GPU fp16 + coopmat | 204 | 60 dB |
+| Hybride | 269 à 293 | 73 dB |
+
+- **Mode hybride :** il ne gagne rien. Le CPU met plus de 2 s par image, ne traite que 12 % des images et ralentit le GPU.
+- **fp16 + coopmat :** ce n'était pas un blocage. Le pilote a mis 98 s à construire les pipelines au premier lancement, puis cette configuration a été la plus rapide en RIFE 4.9.
+- **Logs en temps réel :** le benchmark annonce chaque configuration et chaque phase (chargement, warm-up, contrôle qualité, mesure). Toutes les 5 s, il affiche une ligne de progression avec le temps écoulé et le nombre d'inférences terminées.
+- **Réponses tardives :** une réponse arrivée après la limite est signalée comme lente, et le GPU est de nouveau utilisable.
+- **Limite de temps pour fp16 + coopmat :** 240 s, au benchmark comme à l'auto-test d'une tâche.
+
 ## Limites connues
 
 * Sortie **MP4 uniquement** (H.264 ou HEVC), pas de GIF/PNG/MKV.

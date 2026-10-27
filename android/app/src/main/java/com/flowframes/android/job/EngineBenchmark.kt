@@ -67,16 +67,69 @@ object EngineBenchmark {
     /** One configuration (build + warm-up + measure) giving no answer for this long has hung. */
     private const val CONFIG_TIMEOUT_S = 90L
 
-    /** Runs [block] on its own daemon thread and gives up after [seconds]. */
-    private fun <T> withTimeout(seconds: Long, onTimeout: () -> Unit, block: () -> T): T {
+    /**
+     * fp16 + cooperative matrix: the Adreno 840 driver took 98 s to build those pipelines on the
+     * first run (it answered after the 90 s limit), so that configuration gets more time.
+     */
+    private const val COOP_TIMEOUT_S = 240L
+
+    /** A live progress line is printed this often while a configuration runs. */
+    private const val HEARTBEAT_S = 5L
+
+    /** What a running configuration is doing, read by the heartbeat. */
+    private class Progress {
+        val startNs = System.nanoTime()
+        @Volatile var phase = "starting"
+        @Volatile var phaseStartNs = startNs
+        @Volatile var futures: List<Future<*>> = emptyList()
+        @Volatile var timedOut = false
+
+        fun enter(phase: String, report: (String) -> Unit) {
+            this.phase = phase
+            phaseStartNs = System.nanoTime()
+            report("    · $phase")
+        }
+
+        fun elapsedS(): Long = (System.nanoTime() - startNs) / 1_000_000_000L
+
+        fun describe(): String {
+            val inPhase = (System.nanoTime() - phaseStartNs) / 1_000_000_000L
+            val f = futures
+            val count = if (f.isEmpty()) "" else " · ${f.count { it.isDone }}/${f.size} inferences done"
+            return "$phase for $inPhase s$count"
+        }
+    }
+
+    /**
+     * Runs [block] on its own daemon thread, prints a progress line every [HEARTBEAT_S] seconds
+     * and gives up after [seconds]. The block keeps running after a timeout (a native call cannot
+     * be interrupted); it can see that through [Progress.timedOut].
+     */
+    private fun <T> withTimeout(
+        seconds: Long,
+        progress: Progress,
+        report: (String) -> Unit,
+        onTimeout: () -> Unit,
+        block: () -> T
+    ): T {
         val executor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
             Thread(r, "benchmark-config").apply { isDaemon = true }
         }
         try {
-            return executor.submit<T> { block() }.get(seconds, java.util.concurrent.TimeUnit.SECONDS)
-        } catch (e: java.util.concurrent.TimeoutException) {
-            onTimeout()
-            throw e
+            val future = executor.submit<T> { block() }
+            while (true) {
+                try {
+                    return future.get(HEARTBEAT_S, java.util.concurrent.TimeUnit.SECONDS)
+                } catch (e: java.util.concurrent.TimeoutException) {
+                    val elapsed = progress.elapsedS()
+                    if (elapsed >= seconds) {
+                        progress.timedOut = true
+                        onTimeout()
+                        throw e
+                    }
+                    report("    … ${elapsed} s / ${seconds} s max · ${progress.describe()}")
+                }
+            }
         } catch (e: java.util.concurrent.ExecutionException) {
             throw e.cause ?: e
         } finally {
@@ -149,17 +202,27 @@ object EngineBenchmark {
                 results += Result(cfg, Double.MAX_VALUE, null, "skipped after a GPU hang")
                 continue
             }
+            val tag = "[${index + 1}/${configs.size}] ${cfg.label}"
+            val limit = if (cfg.fp16 && cfg.coop) COOP_TIMEOUT_S else CONFIG_TIMEOUT_S
+            report("$tag …")
+            val progress = Progress()
             val result = runCatching {
-                withTimeout(CONFIG_TIMEOUT_S, onTimeout = {
+                withTimeout(limit, progress, report, onTimeout = {
                     if (cfg.kind == EngineKind.NCNN_GPU) EngineFactory.markGpuHung()
                 }) {
                     val t0 = System.currentTimeMillis()
+                    progress.enter("building the engine (loading the model)", report)
                     // Not closed on a timeout: a hung native call must not see its engine freed.
                     val p = makePool(context, fastSettings, cfg, width, height)
                     try {
+                        progress.enter(
+                            if (cfg.kind == EngineKind.NCNN_GPU) "warm-up (first run builds the GPU pipelines)" else "warm-up",
+                            report
+                        )
                         p.warmUp(width, height)
                         val initMs = System.currentTimeMillis() - t0
                         val total = cfg.workers + cfg.cpuWorkers
+                        progress.enter("quality check against ONNX", report)
                         val single = FloatArray(width * height * 3)
                         p.submit(frames0, frames1, width, height, 0.5f, single).get()
                         val psnr = reference?.let { ref -> psnr(single, ref) }
@@ -168,21 +231,31 @@ object EngineBenchmark {
                         // shared between calls (only the single run above is checked).
                         val outs = Array(total) { FloatArray(width * height * 3) }
                         val count = cfg.rounds * total
-                        val start = System.nanoTime()
                         val futures = ArrayList<Future<*>>(count)
+                        progress.enter("measuring $count inferences", report)
+                        val start = System.nanoTime()
                         for (i in 0 until count) futures += p.submit(frames0, frames1, width, height, 0.5f, outs[i % total])
+                        progress.futures = futures
                         futures.forEach { it.get() }
                         val perFrame = (System.nanoTime() - start) / 1_000_000.0 / count
                         val split = if (cfg.cpuWorkers > 0) " · " + p.engineStats() else ""
-                        report(
-                            String.format(
-                                Locale.US, "[%d/%d] %s → %.0f ms/inference%s (init %d ms)%s",
-                                index + 1, configs.size, cfg.label, perFrame,
-                                psnr?.let { String.format(Locale.US, " · %.1f dB vs ONNX", it) } ?: "",
-                                initMs, split
-                            )
+                        val line = String.format(
+                            Locale.US, "%.0f ms/inference%s (init %d ms)%s",
+                            perFrame,
+                            psnr?.let { String.format(Locale.US, " · %.1f dB vs ONNX", it) } ?: "",
+                            initMs, split
                         )
                         p.close()
+                        if (progress.timedOut) {
+                            // Finished after the limit: slow, not hung. The GPU is usable again.
+                            if (cfg.kind == EngineKind.NCNN_GPU) EngineFactory.clearGpuHung()
+                            report(
+                                "$tag → late answer after ${progress.elapsedS()} s: $line. Not a driver hang, " +
+                                    "a very slow first build of the GPU pipelines (not counted in the ranking)."
+                            )
+                        } else {
+                            report("$tag → $line")
+                        }
                         Result(cfg, perFrame, psnr, null)
                     } catch (t: Throwable) {
                         if (t !is InterruptedException) runCatching { p.close() }
@@ -191,9 +264,9 @@ object EngineBenchmark {
                 }
             }.getOrElse { t ->
                 val msg = if (t is java.util.concurrent.TimeoutException) {
-                    "no answer after $CONFIG_TIMEOUT_S s (driver hang), later GPU tests skipped"
+                    "no answer after $limit s (driver hang or very slow pipeline build), later GPU tests skipped"
                 } else t.message ?: t.javaClass.simpleName
-                report("[${index + 1}/${configs.size}] ${cfg.label} → failed: $msg")
+                report("$tag → failed: $msg")
                 Result(cfg, Double.MAX_VALUE, null, msg)
             }
             results += result
@@ -210,9 +283,11 @@ object EngineBenchmark {
 
         val sustained = best?.takeIf { !(it.config.kind == EngineKind.NCNN_GPU && EngineFactory.gpuHung) }?.let { winner ->
             runCatching {
-                withTimeout(CONFIG_TIMEOUT_S * 2, onTimeout = {}) {
+                report("Sustained pass on ${winner.config.label} ($SUSTAINED_ROUNDS rounds) …")
+                val progress = Progress()
+                withTimeout(CONFIG_TIMEOUT_S * 2, progress, report, onTimeout = {}) {
                     runSustained(context, fastSettings, winner.config, width, height, frames0, frames1,
-                        megapixels, inferencesPerSourceFrame, report)
+                        megapixels, inferencesPerSourceFrame, report, progress)
                 }
             }.getOrElse { t ->
                 report("Sustained pass failed: ${t.message ?: t.javaClass.simpleName}")
@@ -343,9 +418,11 @@ object EngineBenchmark {
         frames1: FloatArray,
         megapixels: Double,
         inferencesPerSourceFrame: Int,
-        report: (String) -> Unit
+        report: (String) -> Unit,
+        progress: Progress
     ): String {
         val before = DeviceInfo.lines(context).firstOrNull { it.startsWith("Thermal") } ?: "Thermal status: unknown"
+        progress.enter("building the engine and warming up", report)
         makePool(context, settings, cfg, width, height).use { pool ->
             pool.warmUp(width, height)
             val total = cfg.workers + cfg.cpuWorkers
@@ -355,9 +432,12 @@ object EngineBenchmark {
             for (r in 0 until SUSTAINED_ROUNDS) {
                 val start = System.nanoTime()
                 val futures = ArrayList<Future<*>>(batch)
+                progress.phase = "round ${r + 1}/$SUSTAINED_ROUNDS"
                 for (w in 0 until batch) futures += pool.submit(frames0, frames1, width, height, 0.5f, outs[w % total])
+                progress.futures = futures
                 futures.forEach { it.get() }
                 rounds[r] = (System.nanoTime() - start) / 1_000_000.0 / batch
+                report(String.format(Locale.US, "    · round %d/%d → %.0f ms/inference", r + 1, SUSTAINED_ROUNDS, rounds[r]))
             }
             val edge = (SUSTAINED_ROUNDS / 3).coerceAtLeast(1)
             val early = rounds.take(edge).average()
