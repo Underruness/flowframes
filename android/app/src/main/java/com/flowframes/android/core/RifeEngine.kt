@@ -202,6 +202,73 @@ class RifeEngine(
         }
     }
 
+    // Inputs for the 8-bit path, outside the Java heap (direct buffers, read by ONNX Runtime
+    // without a copy). The old per-thread float scratch cost 75 MB of heap per session at 1080p
+    // and made the 3-session benchmark run out of memory.
+    private var directIn: java.nio.ByteBuffer? = null
+
+    override fun interpolateArgb(frame0: IntArray, frame1: IntArray, width: Int, height: Int, t: Float, out: IntArray) {
+        val plane = width * height
+        require(frame0.size >= plane && frame1.size >= plane && out.size >= plane) { "frame buffers too small" }
+        val needBytes = plane * 6 * 4
+        val buf = directIn?.takeIf { it.capacity() >= needBytes }
+            ?: java.nio.ByteBuffer.allocateDirect(needBytes).order(java.nio.ByteOrder.nativeOrder()).also { directIn = it }
+        val all = buf.asFloatBuffer()
+        fun fill(src: IntArray, base: Int) {
+            val inv = 1f / 255f
+            for (i in 0 until plane) {
+                val c = src[i]
+                all.put(base + i, ((c ushr 16) and 0xFF) * inv)
+                all.put(base + plane + i, ((c ushr 8) and 0xFF) * inv)
+                all.put(base + 2 * plane + i, (c and 0xFF) * inv)
+            }
+        }
+        fill(frame0, 0)
+        fill(frame1, plane * 3)
+
+        val frameShape = longArrayOf(1, 3, height.toLong(), width.toLong())
+        val tensors = ArrayList<OnnxTensor>(3)
+        try {
+            val feeds = HashMap<String, OnnxTensor>(3)
+            if (splitFrames) {
+                val v0 = all.duplicate().also { it.position(0); it.limit(plane * 3) }.slice()
+                val v1 = all.duplicate().also { it.position(plane * 3); it.limit(plane * 6) }.slice()
+                OnnxTensor.createTensor(env, v0, frameShape).also { tensors.add(it); feeds[firstFrameInput] = it }
+                OnnxTensor.createTensor(env, v1, frameShape).also { tensors.add(it); feeds[secondFrameInput] = it }
+            } else {
+                val v = all.duplicate().also { it.position(0); it.limit(plane * 6) }.slice()
+                OnnxTensor.createTensor(env, v, longArrayOf(1, 6, height.toLong(), width.toLong()))
+                    .also { tensors.add(it); feeds[firstFrameInput] = it }
+            }
+            timestepInput?.let { name ->
+                val tsTensor = if (timestepShape.isEmpty()) {
+                    OnnxTensor.createTensor(env, floatArrayOf(t))
+                } else {
+                    OnnxTensor.createTensor(env, FloatBuffer.wrap(floatArrayOf(t)), longArrayOf(1))
+                }
+                tensors.add(tsTensor)
+                feeds[name] = tsTensor
+            }
+            session.run(feeds).use { result ->
+                val tensor = result.get(0) as? OnnxTensor
+                    ?: throw IllegalStateException("Unexpected model output")
+                tensor.use {
+                    val o = it.floatBuffer
+                    if (o.remaining() < plane * 3) throw IllegalStateException("Output too small: ${o.remaining()} < ${plane * 3}")
+                    val p0 = o.position()
+                    for (i in 0 until plane) {
+                        val r = (o.get(p0 + i).coerceIn(0f, 1f) * 255f + 0.5f).toInt()
+                        val g = (o.get(p0 + plane + i).coerceIn(0f, 1f) * 255f + 0.5f).toInt()
+                        val b = (o.get(p0 + 2 * plane + i).coerceIn(0f, 1f) * 255f + 0.5f).toInt()
+                        out[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                    }
+                }
+            }
+        } finally {
+            tensors.forEach { runCatching { it.close() } }
+        }
+    }
+
     /** Runs one inference on noise, so the first measured frame is not paying for lazy setup. */
     fun warmUp(width: Int, height: Int) {
         val a = FloatArray(width * height * 3) { 0.5f }

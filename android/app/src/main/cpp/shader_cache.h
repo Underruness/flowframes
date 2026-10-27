@@ -23,6 +23,10 @@ namespace flowframes {
 // Directory for the cache files; empty disables both caches. Call before the first engine.
 void setShaderCacheDir(const std::string& dir);
 
+// Driver pipeline cache on disk (the SPIR-V cache is not affected). Turned off by the app after
+// a native crash during a GPU engine build, in case the driver chokes on its own saved blob.
+void setPipelineDiskCache(bool enabled);
+
 // Installs the vkCreateComputePipelines hook. Called right after ncnn::create_gpu_instance().
 void installPipelineCacheHook();
 

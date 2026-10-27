@@ -56,6 +56,12 @@ private:
 
     RifeConfig cfg;
     ncnn::VulkanDevice* vkdev = nullptr;
+
+public:
+    // Set by the JNI layer after the first frame's shader cache save.
+    mutable std::atomic<bool> cacheFlushed{false};
+
+private:
     ncnn::Net flownet;
     bool loaded = false;
 };

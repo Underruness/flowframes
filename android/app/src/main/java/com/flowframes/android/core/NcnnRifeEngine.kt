@@ -32,12 +32,17 @@ class NcnnRifeEngine(
 ) : FrameEngine {
 
     private var handle: Long
+    @Volatile private var firstFrameDone = false
     val deviceName: String
     val modelName: String = File(modelDir).name
 
     init {
         check(isAvailable) { "native RIFE library unavailable: $loadError" }
-        handle = nativeCreate(modelDir, gpuId, cpuThreads, padding, fp16, coopMatrix)
+        handle = if (gpuId >= 0) {
+            CrashLog.gpuBuild("$modelName${if (fp16) " fp16" else ""}${if (fp16 && coopMatrix) " coopmat" else ""}") {
+                nativeCreate(modelDir, gpuId, cpuThreads, padding, fp16, coopMatrix)
+            }
+        } else nativeCreate(modelDir, gpuId, cpuThreads, padding, fp16, coopMatrix)
         if (handle == 0L) throw IllegalStateException("ncnn: ${nativeLastError()}")
         deviceName = nativeDeviceName(handle)
     }
@@ -51,7 +56,10 @@ class NcnnRifeEngine(
     override fun interpolate(frame0: FloatArray, frame1: FloatArray, width: Int, height: Int, t: Float, out: FloatArray) {
         val h = handle
         check(h != 0L) { "engine closed" }
-        val ret = nativeInterpolate(h, frame0, frame1, width, height, t, out)
+        val ret = if (gpuId >= 0 && !firstFrameDone) {
+            CrashLog.gpuBuild("$modelName first frame") { nativeInterpolate(h, frame0, frame1, width, height, t, out) }
+                .also { firstFrameDone = true }
+        } else nativeInterpolate(h, frame0, frame1, width, height, t, out)
         if (ret != 0) throw IllegalStateException("ncnn inference failed (code $ret) on $deviceName")
     }
 
@@ -59,7 +67,11 @@ class NcnnRifeEngine(
     override fun interpolateArgb(frame0: IntArray, frame1: IntArray, width: Int, height: Int, t: Float, out: IntArray) {
         val h = handle
         check(h != 0L) { "engine closed" }
-        val ret = nativeInterpolateArgb(h, frame0, frame1, width, height, t, out)
+        val ret = if (gpuId >= 0 && !firstFrameDone) {
+            // The first frame builds the lazy utility pipelines and saves the cache.
+            CrashLog.gpuBuild("$modelName first frame") { nativeInterpolateArgb(h, frame0, frame1, width, height, t, out) }
+                .also { firstFrameDone = true }
+        } else nativeInterpolateArgb(h, frame0, frame1, width, height, t, out)
         if (ret != 0) throw IllegalStateException("ncnn inference failed (code $ret) on $deviceName")
     }
 
@@ -103,6 +115,18 @@ class NcnnRifeEngine(
             if (isAvailable) runCatching { nativeClearShaderCaches() }
         }
 
+        /** Native crash reports (signal, faulting library, backtrace, native stage) go to [file]. */
+        fun installCrashHandler(file: File) {
+            if (isAvailable) runCatching { nativeInstallCrashHandler(file.absolutePath) }
+        }
+
+        /** Driver pipeline cache on disk; the app turns it off after a crash during a GPU build. */
+        fun setPipelineDiskCache(enabled: Boolean) {
+            if (isAvailable) runCatching { nativeSetPipelineDiskCache(enabled) }
+        }
+
+        @JvmStatic private external fun nativeInstallCrashHandler(path: String)
+        @JvmStatic private external fun nativeSetPipelineDiskCache(enabled: Boolean)
         @JvmStatic private external fun nativeGpuCount(): Int
         @JvmStatic private external fun nativeGpuName(index: Int): String
         @JvmStatic private external fun nativeGpuInfo(index: Int): String

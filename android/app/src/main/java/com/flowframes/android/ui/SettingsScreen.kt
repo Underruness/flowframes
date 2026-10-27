@@ -485,7 +485,11 @@ fun SettingsScreen(
                 }
                 val ctx = LocalContext.current
                 OutlinedButton(onClick = {
-                    Thread { com.flowframes.android.core.NcnnRifeEngine.clearShaderCaches() }.start()
+                    Thread {
+                        com.flowframes.android.core.NcnnRifeEngine.clearShaderCaches()
+                        com.flowframes.android.core.CrashLog.resetGpuSafety(ctx)
+                        com.flowframes.android.core.NcnnRifeEngine.setPipelineDiskCache(true)
+                    }.start()
                     Toast.makeText(ctx, "GPU shader cache cleared: the next GPU run rebuilds it", Toast.LENGTH_SHORT).show()
                 }) { Text("Clear GPU shader cache", fontSize = 12.sp) }
                 Caption(

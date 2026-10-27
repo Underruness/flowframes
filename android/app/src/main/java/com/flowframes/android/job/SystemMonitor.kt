@@ -74,16 +74,31 @@ object SystemMonitor {
         c.takeIf { it > -40 && it < 150 }
     }.getOrNull()
 
-    private fun maxOf(prefixes: List<String>, exclude: List<String> = emptyList()): Double? =
-        zones().filter { z -> prefixes.any { z.type.startsWith(it) || z.type.contains(it) } && exclude.none { z.type.contains(it) } }
-            .mapNotNull { readC(it.temp) }
-            .maxOrNull()
+    /** Virtual or limit zones that are not a die temperature (trip points, mitigation steps…). */
+    private val ignored = listOf("step", "limit", "lmh", "max", "trip", "cdev", "mitig", "virt", "-usr", "ibat", "vbat", "soc_")
 
-    /** Zone types that could be read, for the log (helps when a value shows n/a). */
+    private fun readings(prefixes: List<String>): List<Double> =
+        zones().filter { z -> prefixes.any { z.type.startsWith(it) || z.type.contains(it) } && ignored.none { z.type.contains(it) } }
+            .mapNotNull { readC(it.temp) }
+            // Above 100 °C a phone has shut the core down long before: not a real reading.
+            .filter { it in 5.0..100.0 }
+
+    /**
+     * Median rather than maximum: a Snapdragon exposes 20+ CPU zones and some of them are
+     * virtual or report a fixed limit (the first version showed 105 °C at rest because of one).
+     */
+    private fun median(v: List<Double>): Double? {
+        if (v.isEmpty()) return null
+        val s = v.sorted()
+        return if (s.size % 2 == 1) s[s.size / 2] else (s[s.size / 2 - 1] + s[s.size / 2]) / 2
+    }
+
+    /** Zone types that could be read, with their values, for the log (helps calibrate n/a or odd values). */
     fun zoneSummary(): String {
         val z = zones()
         return if (z.isEmpty()) "no readable thermal zone (vendor restriction)"
-        else "${z.size} readable thermal zones: " + z.map { it.type }.distinct().take(40).joinToString(", ")
+        else "${z.size} readable thermal zones: " +
+            z.take(60).joinToString(", ") { "${it.type}=${readC(it.temp)?.let { c -> String.format(Locale.US, "%.0f", c) } ?: "?"}" }
     }
 
     fun sample(context: Context): Snapshot {
@@ -112,12 +127,12 @@ object SystemMonitor {
             sysAvailMb = sys.availMem / (1024 * 1024),
             sysTotalMb = sys.totalMem / (1024 * 1024),
             lowMemory = sys.lowMemory,
-            cpuC = maxOf(listOf("cpu", "cpuss", "apc", "cpu-")),
-            gpuC = maxOf(listOf("gpu", "gpuss")),
+            cpuC = median(readings(listOf("cpu-", "cpu_", "cpuss", "cpu0", "cpu1", "cpu2", "cpu3", "cpu4", "cpu5", "cpu6", "cpu7", "apc"))),
+            gpuC = readings(listOf("gpu")).maxOrNull(),
             // Qualcomm Hexagon NPU: nspss-*, nsphvx-*, nsphmx-*; others: npu, cdsp, apu (MediaTek).
-            npuC = maxOf(listOf("nsp", "npu", "cdsp", "apu", "q6-hvx", "hvx", "tpu")),
-            batteryC = battery ?: maxOf(listOf("battery")),
-            skinC = maxOf(listOf("skin", "sys-therm", "quiet", "xo-therm")),
+            npuC = readings(listOf("nsp", "npu", "cdsp", "q6-hvx", "hvx", "tpu")).maxOrNull(),
+            batteryC = battery ?: readings(listOf("battery")).maxOrNull(),
+            skinC = readings(listOf("skin", "sys-therm", "quiet", "xo-therm")).maxOrNull(),
             thermal = runCatching { com.flowframes.android.core.DeviceInfo.thermalStatus(pm) }.getOrDefault("unknown"),
             headroom = headroom
         )

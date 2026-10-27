@@ -62,13 +62,18 @@ class JobStore {
         jobs.value = jobs.value + items
     }
 
+    /** Thread-safe (benchmark and inference threads log too); also written to the crash log file. */
+    @Synchronized
     fun addLog(line: String) {
         val stamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
-        val next = logs.value + "[$stamp] $line"
-        logs.value = if (next.size > 1000) next.takeLast(1000) else next
+        val stamped = "[$stamp] $line"
+        com.flowframes.android.core.CrashLog.write(stamped)
+        val next = logs.value + stamped
+        logs.value = if (next.size > 2000) next.takeLast(2000) else next
     }
 
     /** Adds a multi-line block (a benchmark report, a stack trace) one line at a time. */
+    @Synchronized
     fun addLines(text: String) {
         text.lines().forEach { addLog(it) }
     }

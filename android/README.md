@@ -501,6 +501,25 @@ Mesures de la 1.5.1 sur Adreno 840, canevas de 1920x1088, en ms par inférence :
   à la fin, le temps total du travail. Remarque : RIFE tourne sur le GPU, pas sur le NPU ; la
   température NPU est indicative.
 
+### Version 1.6.1 — mémoire des logs et crashs
+
+- **Logs persistants.** Chaque ligne du log est écrite immédiatement dans `files/logs/session.log`.
+  Au démarrage suivant, si la session précédente s'est mal terminée, l'appli ajoute en tête du log :
+  la raison donnée par Android (crash Java, crash natif, tué par manque de mémoire, ANR…), le
+  rapport du gestionnaire de signaux natif (signal, adresse, bibliothèque + offset, backtrace et
+  « étape native » en cours : chargement du modèle, construction des pipelines GPU, inférence,
+  sauvegarde du cache…) et les 60 dernières lignes de la session précédente.
+- **Sécurité GPU.** Si l'appli meurt pendant la construction d'un moteur GPU, le cache de
+  pipelines du pilote sur disque est désactivé automatiquement (le bouton « Clear GPU shader
+  cache » le réactive). Le cache n'est plus enregistré après chaque image mais une seule fois.
+- **Benchmark.** Fenêtre de logs en direct (temps écoulé, RAM, températures). Le benchmark utilise
+  maintenant des images 8 bits comme le travail réel, et le moteur ONNX garde ses entrées hors du
+  tas Java : le test ONNX 3 × 2T ne manque plus de mémoire. La mémoire est affichée après chaque
+  configuration.
+- **Température CPU.** Médiane des capteurs CPU, en ignorant les zones virtuelles ou de limite
+  (la 1.6.0 affichait 105 °C à cause de l'une d'elles). Les valeurs de tous les capteurs sont
+  écrites dans le log.
+
 ## Limites connues
 
 * Sortie **MP4 uniquement** (H.264 ou HEVC), pas de GIF/PNG/MKV.

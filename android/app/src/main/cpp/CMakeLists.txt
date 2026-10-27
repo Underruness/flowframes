@@ -30,7 +30,7 @@ find_package(ncnn REQUIRED)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/shaders.cmake)
 
-add_library(flowframes_rife SHARED rife_jni.cpp rife_core.cpp warp.cpp shader_cache.cpp ${RIFE_SHADER_HEADERS})
+add_library(flowframes_rife SHARED rife_jni.cpp rife_core.cpp warp.cpp shader_cache.cpp crash_handler.cpp ${RIFE_SHADER_HEADERS})
 target_include_directories(flowframes_rife PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
 target_compile_options(flowframes_rife PRIVATE -O3 -fvisibility=hidden -ffunction-sections -fdata-sections)
 target_link_options(flowframes_rife PRIVATE -Wl,--gc-sections -Wl,--exclude-libs,ALL

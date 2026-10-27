@@ -11,6 +11,7 @@
 #include "gpu.h"
 #include "rife_core.h"
 #include "shader_cache.h"
+#include "crash_handler.h"
 
 #define LOG_TAG "FlowFramesRife"
 #ifdef __ANDROID__
@@ -111,7 +112,14 @@ Java_com_flowframes_android_core_NcnnRifeEngine_nativeInterpolate(JNIEnv* env, j
     env->GetFloatArrayRegion(frame1, 0, n, b.data());
     int ret = core->interpolate(a.data(), b.data(), width, height, t, o.data());
     if (ret == 0) env->SetFloatArrayRegion(out, 0, n, o.data());
-    flowframes::flushShaderCaches();
+    // Lazily built utility pipelines (layout casts) exist after the first frame: save once then.
+    // Not after every frame: merging the driver caches while another session builds pipelines is
+    // exactly the kind of concurrency a mobile driver may not survive.
+    if (ret == 0 && !core->cacheFlushed.exchange(true)) {
+        flowframes::setStage("saving the GPU shader cache (first frame)");
+        flowframes::flushShaderCaches();
+        flowframes::setStage("idle");
+    }
     return ret;
 }
 
@@ -135,7 +143,14 @@ Java_com_flowframes_android_core_NcnnRifeEngine_nativeInterpolateArgb(JNIEnv* en
     env->GetIntArrayRegion(frame1, 0, n, reinterpret_cast<jint*>(b.data()));
     int ret = core->interpolateArgb(a.data(), b.data(), width, height, t, o.data());
     if (ret == 0) env->SetIntArrayRegion(out, 0, n, reinterpret_cast<const jint*>(o.data()));
-    flowframes::flushShaderCaches();
+    // Lazily built utility pipelines (layout casts) exist after the first frame: save once then.
+    // Not after every frame: merging the driver caches while another session builds pipelines is
+    // exactly the kind of concurrency a mobile driver may not survive.
+    if (ret == 0 && !core->cacheFlushed.exchange(true)) {
+        flowframes::setStage("saving the GPU shader cache (first frame)");
+        flowframes::flushShaderCaches();
+        flowframes::setStage("idle");
+    }
     return ret;
 }
 
@@ -147,6 +162,17 @@ Java_com_flowframes_android_core_NcnnRifeEngine_nativeSetShaderCacheDir(JNIEnv* 
 JNIEXPORT jstring JNICALL
 Java_com_flowframes_android_core_NcnnRifeEngine_nativeShaderCacheStats(JNIEnv* env, jclass) {
     return env->NewStringUTF(flowframes::shaderCacheStats().c_str());
+}
+
+JNIEXPORT void JNICALL
+Java_com_flowframes_android_core_NcnnRifeEngine_nativeInstallCrashHandler(JNIEnv* env, jclass, jstring path) {
+    std::string p = jstr(env, path);
+    flowframes::installCrashHandler(p.c_str());
+}
+
+JNIEXPORT void JNICALL
+Java_com_flowframes_android_core_NcnnRifeEngine_nativeSetPipelineDiskCache(JNIEnv*, jclass, jboolean on) {
+    flowframes::setPipelineDiskCache(on == JNI_TRUE);
 }
 
 JNIEXPORT void JNICALL

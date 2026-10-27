@@ -193,7 +193,7 @@ object EngineBenchmark {
         val frames0 = syntheticFrame(width, height, 0)
         val frames1 = syntheticFrame(width, height, 6)
         val results = ArrayList<Result>(configs.size)
-        var reference: FloatArray? = null
+        var reference: IntArray? = null
         val fastSettings = settings.copy(quality = AiQuality.FAST)
 
         for ((index, cfg) in configs.withIndex()) {
@@ -223,18 +223,18 @@ object EngineBenchmark {
                         val initMs = System.currentTimeMillis() - t0
                         val total = cfg.workers + cfg.cpuWorkers
                         progress.enter("quality check against ONNX", report)
-                        val single = FloatArray(width * height * 3)
-                        p.submit(frames0, frames1, width, height, 0.5f, single).get()
+                        val single = IntArray(width * height)
+                        p.submitArgb(frames0, frames1, width, height, 0.5f, single).get()
                         val psnr = reference?.let { ref -> psnr(single, ref) }
                         if (reference == null && cfg.kind == EngineKind.ORT_CPU) reference = single
                         // Throughput: everything queued at once, as the job does. Outputs are
                         // shared between calls (only the single run above is checked).
-                        val outs = Array(total) { FloatArray(width * height * 3) }
+                        val outs = Array(total) { IntArray(width * height) }
                         val count = cfg.rounds * total
                         val futures = ArrayList<Future<*>>(count)
                         progress.enter("measuring $count inferences", report)
                         val start = System.nanoTime()
-                        for (i in 0 until count) futures += p.submit(frames0, frames1, width, height, 0.5f, outs[i % total])
+                        for (i in 0 until count) futures += p.submitArgb(frames0, frames1, width, height, 0.5f, outs[i % total])
                         progress.futures = futures
                         futures.forEach { it.get() }
                         val perFrame = (System.nanoTime() - start) / 1_000_000.0 / count
@@ -270,6 +270,9 @@ object EngineBenchmark {
                 Result(cfg, Double.MAX_VALUE, null, msg)
             }
             results += result
+            // Memory trend per configuration: a leak or a near-full heap shows up here first.
+            System.gc()
+            report("    · ${heapLine()} · ${SystemMonitor.sample(context).shortLine()}")
         }
 
         // Same weights must agree with the reference; RIFE 4.6 is a different model, so only a
@@ -304,6 +307,7 @@ object EngineBenchmark {
         sb.appendLine("Vulkan GPUs: $gpus" + if (gpus > 0) " (${NcnnRifeEngine.gpuInfo(0)})" else "")
         if (gpus > 0) NcnnRifeEngine.shaderCacheStats().takeIf { it.isNotBlank() }?.let { sb.appendLine("GPU cache: $it") }
         sb.appendLine(SystemMonitor.sample(context).shortLine())
+        sb.appendLine("Sensors: " + SystemMonitor.zoneSummary())
         sb.appendLine("--- results (ms per interpolated frame, lower is better) ---")
         results.sortedBy { it.msPerFrame }.forEach { r ->
             if (r.error == null) {
@@ -377,33 +381,42 @@ object EngineBenchmark {
             width, height, log = {}
         )
 
-    private fun syntheticFrame(width: Int, height: Int, shift: Int): FloatArray {
-        val plane = width * height
-        val f = FloatArray(plane * 3)
-        for (c in 0 until 3) {
-            for (y in 0 until height) {
-                for (x in 0 until width) {
-                    val xs = x - shift
+    /** 8-bit ARGB, like the job's frames (the benchmark measures the path the job uses). */
+    private fun syntheticFrame(width: Int, height: Int, shift: Int): IntArray {
+        val f = IntArray(width * height)
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val xs = x - shift
+                var px = 0xFF shl 24
+                for (c in 0 until 3) {
                     val v = 0.5 + 0.3 * kotlin.math.sin(xs * 0.05 + c) * kotlin.math.cos(y * 0.04 - c) +
                         0.15 * kotlin.math.sin((xs + y) * 0.013)
-                    f[c * plane + y * width + x] = v.toFloat().coerceIn(0f, 1f)
+                    val b = (v.coerceIn(0.0, 1.0) * 255.0 + 0.5).toInt()
+                    px = px or (b shl (16 - 8 * c))
                 }
+                f[y * width + x] = px
             }
         }
         return f
     }
 
-    private fun psnr(a: FloatArray, b: FloatArray): Double {
+    private fun psnr(a: IntArray, b: IntArray): Double {
         var se = 0.0
         for (i in a.indices) {
-            val x = a[i].coerceIn(0f, 1f)
-            val y = b[i].coerceIn(0f, 1f)
-            if (x.isNaN()) return 0.0
-            val d = (x - y).toDouble()
-            se += d * d
+            val x = a[i]
+            val y = b[i]
+            for (sh in intArrayOf(0, 8, 16)) {
+                val d = (((x ushr sh) and 0xFF) - ((y ushr sh) and 0xFF)) / 255.0
+                se += d * d
+            }
         }
-        val mse = se / a.size
+        val mse = se / (a.size * 3.0)
         return if (mse <= 1e-12) 99.0 else 10.0 * log10(1.0 / mse)
+    }
+
+    private fun heapLine(): String {
+        val rt = Runtime.getRuntime()
+        return "Java heap ${(rt.totalMemory() - rt.freeMemory()) / 1048576}/${rt.maxMemory() / 1048576} MB"
     }
 
     /**
@@ -416,8 +429,8 @@ object EngineBenchmark {
         cfg: Config,
         width: Int,
         height: Int,
-        frames0: FloatArray,
-        frames1: FloatArray,
+        frames0: IntArray,
+        frames1: IntArray,
         megapixels: Double,
         inferencesPerSourceFrame: Int,
         report: (String) -> Unit,
@@ -429,13 +442,13 @@ object EngineBenchmark {
             pool.warmUp(width, height)
             val total = cfg.workers + cfg.cpuWorkers
             val batch = if (cfg.cpuWorkers > 0) total * 4 else total
-            val outs = Array(total) { FloatArray(width * height * 3) }
+            val outs = Array(total) { IntArray(width * height) }
             val rounds = DoubleArray(SUSTAINED_ROUNDS)
             for (r in 0 until SUSTAINED_ROUNDS) {
                 val start = System.nanoTime()
                 val futures = ArrayList<Future<*>>(batch)
                 progress.phase = "round ${r + 1}/$SUSTAINED_ROUNDS"
-                for (w in 0 until batch) futures += pool.submit(frames0, frames1, width, height, 0.5f, outs[w % total])
+                for (w in 0 until batch) futures += pool.submitArgb(frames0, frames1, width, height, 0.5f, outs[w % total])
                 progress.futures = futures
                 futures.forEach { it.get() }
                 rounds[r] = (System.nanoTime() - start) / 1_000_000.0 / batch

@@ -10,6 +10,7 @@
 #include "layer.h"
 #include "rife_ops.h"
 #include "shader_cache.h"
+#include "crash_handler.h"
 
 DEFINE_LAYER_CREATOR(Warp)
 
@@ -111,17 +112,23 @@ int RifeCore::load(const RifeConfig& config, std::string& error) {
 
     std::string param = cfg.modelDir + "/flownet.param";
     std::string bin = cfg.modelDir + "/flownet.bin";
+    setStage("ncnn load_param");
     if (flownet.load_param(param.c_str()) != 0) {
         error = "cannot load " + param;
         return -2;
     }
+    setStage(vkdev ? "ncnn load_model (GPU shader + pipeline build)" : "ncnn load_model (CPU)");
     if (flownet.load_model(bin.c_str()) != 0) {
         error = "cannot load " + bin;
         return -3;
     }
     loaded = true;
     // ncnn builds every layer's pipeline in load_model: persist them before the first frame.
-    if (vkdev) flushShaderCaches();
+    if (vkdev) {
+        setStage("saving the GPU shader cache");
+        flushShaderCaches();
+    }
+    setStage("idle");
     return 0;
 }
 
@@ -185,6 +192,7 @@ int RifeCore::run(const ncnn::Mat& in0, const ncnn::Mat& in1, int width, int hei
         if (ex.input("in0", in0) != 0) return -2;
         if (ex.input("in1", in1) != 0) return -2;
         if (ex.input("in2", ts) != 0) return -2;
+        setStage(vkdev ? "ncnn extract (GPU inference)" : "ncnn extract (CPU inference)");
         int ret = ex.extract("out0", result);
         if (ret != 0) return -3;
     }

@@ -32,6 +32,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.flowframes.android.job.AppGraph
+import com.flowframes.android.ui.BenchmarkLiveDialog
 import com.flowframes.android.core.RifeEngine
 import com.flowframes.android.job.EngineBenchmark
 import com.flowframes.android.job.EngineKind
@@ -68,6 +69,7 @@ class MainActivity : ComponentActivity() {
         val benchmarkRunning by AppGraph.jobs.benchmarkRunning.collectAsState()
         val scope = rememberCoroutineScope()
         var showSettings by remember { mutableStateOf(false) }
+        var showBenchLive by remember { mutableStateOf(false) }
 
         val copyLogs: () -> Unit = {
             val text = AppGraph.jobs.logText()
@@ -77,7 +79,8 @@ class MainActivity : ComponentActivity() {
         }
 
         val shareLogs: () -> Unit = {
-            val text = AppGraph.jobs.logText().ifEmpty { "FlowFrames: log is empty" }
+            // A share intent over ~500 kB fails (binder limit): the most recent part is what matters.
+            val text = AppGraph.jobs.logText().ifEmpty { "FlowFrames: log is empty" }.takeLast(200_000)
             val send = Intent(Intent.ACTION_SEND).apply {
                 type = "text/plain"
                 putExtra(Intent.EXTRA_SUBJECT, "FlowFrames Android logs")
@@ -90,6 +93,7 @@ class MainActivity : ComponentActivity() {
             if (!benchmarkRunning && !running) {
                 AppGraph.jobs.benchmarkRunning.value = true
                 AppGraph.jobs.addLog("▶ Engine benchmark started")
+                showBenchLive = true
                 scope.launch {
                     val result = withContext(Dispatchers.Default) {
                         runCatching {
@@ -99,6 +103,8 @@ class MainActivity : ComponentActivity() {
                                 report = { line -> AppGraph.jobs.addLog(line) }
                             )
                         }.getOrElse { t ->
+                            AppGraph.jobs.addLog("Benchmark failed:")
+                            AppGraph.jobs.addLines(com.flowframes.android.core.CrashLog.stackTrace(t))
                             EngineBenchmark.Report(
                                 "=== FLOWFRAMES ENGINE BENCHMARK ===\n" +
                                     "Benchmark failed: ${t.message ?: t.javaClass.simpleName}",
@@ -181,6 +187,10 @@ class MainActivity : ComponentActivity() {
                 onShareLogs = shareLogs,
                 onRemove = { id -> AppGraph.jobs.remove(id) }
             )
+        }
+
+        if (benchmarkRunning && showBenchLive) {
+            BenchmarkLiveDialog(logs, onHide = { showBenchLive = false }, onCopy = copyLogs)
         }
 
         benchmark?.let { report ->

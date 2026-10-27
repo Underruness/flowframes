@@ -1,4 +1,5 @@
 #include "shader_cache.h"
+#include "crash_handler.h"
 
 #include <atomic>
 #include <chrono>
@@ -47,6 +48,7 @@ std::atomic<long long> g_pipelines{0}, g_pipelineNs{0};
 std::atomic<long long> g_spirvFileBytes{0}, g_pipelineFileBytes{0};
 std::atomic<bool> g_pipelineDirty{false};
 bool g_pipelineFromDisk = false;
+std::atomic<bool> g_pipelineDisk{true}; // off after a crash during a GPU build
 
 PFN_vkCreateComputePipelines g_origCreate = nullptr;
 PFN_vkCreatePipelineCache g_origCreateCache = nullptr;
@@ -219,7 +221,7 @@ void fillHeader(PipelineHeader& h, int gpu) {
 bool loadPipelineBlobLocked(std::vector<unsigned char>& file, const void*& data, size_t& size) {
     data = nullptr;
     size = 0;
-    if (g_dir.empty() || ncnn::get_gpu_count() == 0) return false;
+    if (g_dir.empty() || !g_pipelineDisk || ncnn::get_gpu_count() == 0) return false;
     if (!readFile(pipelinePath(), file) || file.size() <= sizeof(PipelineHeader)) return false;
     PipelineHeader want, have;
     fillHeader(want, 0);
@@ -241,7 +243,7 @@ void trackLocked(VkDevice device, VkPipelineCache cache) {
 
 // Merges every live cache into a scratch one and writes it out. Caller holds g_lock.
 void savePipelinesLocked() {
-    if (g_dir.empty() || g_caches.empty() || !g_pipelineDirty.exchange(false)) return;
+    if (g_dir.empty() || !g_pipelineDisk || g_caches.empty() || !g_pipelineDirty.exchange(false)) return;
     const VkDevice device = g_caches[0].device;
     std::vector<VkPipelineCache> sources;
     for (const auto& c : g_caches) {
@@ -251,6 +253,7 @@ void savePipelinesLocked() {
     memset(&info, 0, sizeof(info));
     info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
     VkPipelineCache merged = VK_NULL_HANDLE;
+    setStage("GPU driver: merging pipeline caches for the disk cache");
     if (g_origCreateCache(device, &info, nullptr, &merged) != VK_SUCCESS) return;
     size_t size = 0;
     if (ncnn::vkMergePipelineCaches(device, merged, (uint32_t)sources.size(), sources.data()) == VK_SUCCESS &&
@@ -281,6 +284,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hookedCreatePipelineCache(
         VkPipelineCacheCreateInfo seeded = *info;
         seeded.initialDataSize = size;
         seeded.pInitialData = data;
+        setStage("GPU driver: loading the saved pipeline cache");
         r = g_origCreateCache(device, &seeded, allocator, out);
         if (r == VK_SUCCESS) {
             g_pipelineFromDisk = true;
@@ -335,6 +339,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hookedCreateComputePipelines(
     VkDevice device, VkPipelineCache cache, uint32_t count, const VkComputePipelineCreateInfo* infos,
     const VkAllocationCallbacks* allocator, VkPipeline* pipelines) {
     if (cache == VK_NULL_HANDLE) cache = ownCacheFor(device);
+    setStage("GPU driver: building compute pipelines");
     const long long t0 = nowNs();
     VkResult r = g_origCreate(device, cache, count, infos, allocator, pipelines);
     g_pipelineNs += nowNs() - t0;
@@ -358,6 +363,10 @@ std::string mb(long long bytes) {
 void setShaderCacheDir(const std::string& dir) {
     std::lock_guard<std::mutex> lock(g_lock);
     g_dir = dir;
+}
+
+void setPipelineDiskCache(bool enabled) {
+    g_pipelineDisk = enabled;
 }
 
 void installPipelineCacheHook() {
@@ -388,7 +397,7 @@ std::string shaderCacheStats() {
              "(driver cache %s) · cache files %s + %s",
              (long long)g_spirvCompiled, g_spirvNs / 1e9, (long long)g_spirvHits, (long long)g_pipelines,
              g_pipelineNs / 1e9,
-             g_dir.empty() ? "off" : (g_pipelineFromDisk ? "loaded from disk" : "new"),
+             g_dir.empty() || !g_pipelineDisk ? "off" : (g_pipelineFromDisk ? "loaded from disk" : "new"),
              mb(g_spirvFileBytes).c_str(), mb(g_pipelineFileBytes).c_str());
     return buf;
 }
