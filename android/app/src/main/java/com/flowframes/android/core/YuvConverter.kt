@@ -112,7 +112,7 @@ object YuvConverter {
                 val g = (c ushr 8) and 0xFF
                 val b = c and 0xFF
                 val yv = ((eY[0] * r + eY[1] * g + eY[2] * b + 128) shr 8) + spec.encYOff
-                y.put(yBase + col, clamp(yv.toByte()))
+                y.put(yBase + col, clamp(yv).toByte())
             }
         }
         for (row in 0 until height step 2) {
@@ -143,8 +143,8 @@ object YuvConverter {
                 val uu = ((eU[0] * r + eU[1] * g + eU[2] * b + 128) shr 8) + spec.encUvOff
                 val vv = ((eV[0] * r + eV[1] * g + eV[2] * b + 128) shr 8) + spec.encUvOff
                 val idx = uvBase + (col shr 1) * uvPixelStride
-                u.put(idx, clamp(uu.toByte()))
-                v.put(idx, clamp(vv.toByte()))
+                u.put(idx, clamp(uu).toByte())
+                v.put(idx, clamp(vv).toByte())
             }
         }
     }
@@ -445,6 +445,4 @@ object YuvConverter {
     }
 
     private fun clamp(v: Int): Int = if (v < 0) 0 else if (v > 255) 255 else v
-
-    private fun clamp(v: Byte): Byte = v
 }

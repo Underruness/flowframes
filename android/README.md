@@ -13,8 +13,11 @@ vidéo source ──► MediaCodec (décodage matériel) ──► RIFE 4.9 / ON
 
 ## Installation
 
-L'APK signé est fourni avec le module : `android/app/build/outputs/apk/release/app-release.apk`
-(copie de distribution : `artifacts/FlowFrames-Android-1.0.0.apk`).
+L'APK de la version 1.5.0 est versionné dans le dépôt :
+[`dist/FlowFrames-Android-1.5.0.apk`](dist/FlowFrames-Android-1.5.0.apk)
+(construit ici avec `./gradlew :app:assembleRelease`, 68 Mio, `arm64-v8a` uniquement).
+Il est signé avec la clé de debug du SDK (voir « Signature »), donc Android refuse de l'installer
+par-dessus une APK signée avec une autre clé : désinstallez d'abord dans ce cas.
 
 1. Copiez l'APK sur le téléphone (ou `adb install -r app-release.apk`).
 2. Autorisez l'installation depuis une source inconnue si Android le demande.
@@ -121,7 +124,7 @@ Sortie : `app/build/outputs/apk/release/app-release.apk`.
 ### Tests
 
 ```bash
-./gradlew testDebugUnitTest        # 48 tests JVM (moteur RIFE vs référence Python, YUV, plan, nommage)
+./gradlew testDebugUnitTest        # 58 tests JVM (moteur RIFE vs référence Python, YUV, ordonnancement du pool, plan, nommage)
 ./gradlew connectedDebugAndroidTest # tests instrumentés (pipeline complet + UI) sur appareil/émulateur
 ```
 
@@ -146,13 +149,15 @@ adb shell am instrument -w \
 | Vérification | Résultat |
 |---|---|
 | Compilation (debug + release, lint vital) | ✅ |
-| 48 tests unitaires JVM | ✅ |
+| 58 tests unitaires JVM (+1 désactivé : la sonde de performance) | ✅ |
 | Sortie du moteur RIFE identique à la référence Python (deux modèles, 3 phases) | ✅ |
 | APK signé, installé et démarré sur Android 12 (émulateur x86_64) | ✅ |
 | Encodage MP4 de bout en bout par `VideoEncoder` (images réelles) | ✅ |
 | Lecture des métadonnées, ouverture du décodeur, chargement du modèle ONNX + XNNPACK | ✅ |
 | Pipeline complet décodage → RIFE → encodage → mux sur Android 12 | ✅ test instrumenté passé |
-| Interface Compose (rendu, navigation) | ⚠️ test écrit, exécution non confirmée |
+| Interface Compose (rendu, navigation) | ⚠️ test écrit (libellés anglais vérifiés dans le code), exécution non confirmée |
+| 1.5.0 : compilation, 58 tests, APK release, dans une chaîne d'outils propre (JDK 17 + SDK 34, sans keystore) | ✅ |
+| 1.5.0 : tests instrumentés (pipeline complet, UI) | ⚠️ non exécutables dans cet environnement : `/dev/kvm` inaccessible, l'émulateur ne tournerait pas en accéléré |
 
 Le test `PipelineEndToEndTest` a été exécuté sur un émulateur Android 12 : à partir d'une vidéo
 de 4 images, la sortie fait 7 images en 60 fps, relue correctement par `VideoInfo`, avec un MP4
@@ -381,9 +386,38 @@ Pistes suivantes, par ordre de rendement attendu :
   le fournisseur les prend ; `GridSample` n'en a pas, donc le gain réel dépend des `Cast` insérés.
   À mesurer sur l'appareil avant d'être proposé.
 * **Modèle plus léger** (RIFE-lite ou IFRNet) : le seul levier qui divise réellement le coût, au prix
-  d'un réentraînement ou d'un autre choix de qualité.
-* **GPU** : `rife-ncnn-vulkan` est l'implémentation rapide de référence, mais elle demande du code
-  natif NDK et un modèle ncnn ; impossible à valider depuis cette VM, donc pas livré.
+  d'un réentraînement ou d'un autre choix de qualité.* **GPU** : `rife-ncnn-vulkan` est l'implémentation rapide de référence, mais elle demande du code natif NDK et un modèle ncnn ; impossible à valider depuis cette VM, donc pas livré.
+
+### Version 1.5.0 — fin de flux explicite, une session par thread
+
+Corrections issues d'une relecture du port. Ce qui change :
+
+* **Une inférence par session, garanti.** Le pool utilisait un unique pool de threads fixe avec une
+  attribution des moteurs en round-robin : rien n'empêchait la tâche soumise en second de démarrer
+  la première et de tomber sur une session déjà occupée, ce qui supprime l'isolation sur laquelle
+  reposent les 2,1× mesurés (une session = une inférence à la fois). Chaque session a maintenant son
+  propre exécuteur mono-thread ; `peakConcurrencyPerSession`, journalisé et testé, doit rester à 1.
+  C'est peut-être l'écart entre la prédiction 2,2-2,7 image source/s de la 1.4.0 et ce que le banc
+  embarqué donnera.
+* **Un arrêt n'est plus une fin de fichier.** Le décodeur abandonnait après 15 s sans sortie et
+  renvoyait `null`, que le pipeline traitait comme la fin du flux : un appareil lent pouvait donc
+  écrire une vidéo plus courte que l'entrée **sans aucune erreur**. `decodeNext` distingue désormais
+  `Frame`, `EndOfStream` et `Stalled` (60 s sans aucun progrès) ; un blocage fait échouer la tâche
+  avec un message explicite, et la sortie partielle est supprimée.
+* **L'encodeur dit s'il a confirmé la fin du flux** (`Finish.COMPLETE`, `END_OF_STREAM_REJECTED`,
+  `END_OF_STREAM_UNCONFIRMED`) et le journal signale une queue éventuellement manquante.
+* **Garde-fou de durée** : si la sortie couvre moins de 90 % de la source, le journal écrit
+  `⚠ Output covers …` au lieu de laisser passer un fichier tronqué pour un succès.
+* **Le banc d'essai mesure enfin le mode d'exécution parallèle** (`parallel ops`). Il était exposé
+  dans les réglages et présenté comme mesuré depuis la 1.2.0, alors qu'aucune configuration ne
+  l'activait : le paragraphe de la 1.2.0 qui le listait était faux jusqu'ici.
+* **Tests** : `UiSmokeTest` vérifie les libellés anglais réellement affichés (il cherchait encore
+  « Ajouter », « Réglages », « Qualité du modèle » et aurait échoué), un test d'ordonnancement à une
+  inférence par session utilise des moteurs simulés (sans charger de modèle), et un test instrumenté
+  vérifie que le décodeur atteint bien la fin du flux au lieu de signaler un blocage.
+* **Détails** : les deux derniers messages français de `VideoEncoder` sont traduits, et le clamp de
+  `argbToYuv420` borne la valeur avant la conversion en octet (l'ancienne forme appelait une
+  surcharge identité, donc ne bornait rien).
 
 ## Limites connues
 
@@ -394,6 +428,13 @@ Pistes suivantes, par ordre de rendement attendu :
   ce qui peut décaler légèrement les cas extrêmes.
 * L'interpolation de RIFE est purement 2D : pas de vecteurs de mouvement 3D ni d'audio.
 * Sur un appareil sans encodeur HEVC, la sortie repasse automatiquement en H.264.
+* Le décodage semi-planar suppose la disposition habituelle d'Android (le plan V partage la mémoire
+  du plan U, décalée d'un octet). C'est le seul endroit du port qui dépend d'un détail peu documenté
+  de la plateforme : une mauvaise hypothèse se verrait en chroma permuté, pas en plantage.
+* La file d'attente vit en mémoire et le service est `START_NOT_STICKY` : si le processus est tué, la
+  file est perdue (les fichiers déjà écrits restent sur le disque).
+* L'APK publié est signé avec la clé de debug du SDK : il faut désinstaller une version installée
+  avec une autre clé avant de l'installer.
 
 ## Crédits et licences
 

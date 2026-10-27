@@ -9,6 +9,7 @@ import com.flowframes.android.job.AiQuality
 import com.flowframes.android.job.Interpolator
 import com.flowframes.android.job.OutputCodec
 import com.flowframes.android.job.Settings
+import com.flowframes.android.video.VideoDecoder
 import com.flowframes.android.video.VideoEncoder
 import com.flowframes.android.video.VideoInfo
 import org.junit.Assert.assertEquals
@@ -73,7 +74,8 @@ class PipelineEndToEndTest {
                 encoder.encode(argb, i * 33_333L)
                 println("PIPELINE: clip frame $i written")
             }
-            encoder.finishVideo()
+            val finish = encoder.finishVideo()
+            println("PIPELINE: clip finished with $finish")
         } finally {
             encoder.close()
             pfd.close()
@@ -96,11 +98,11 @@ class PipelineEndToEndTest {
         val sourceFrames = args.getString("frames")?.toIntOrNull() ?: 4
 
         val input = makeTestClip(File(dir, "input.mp4"), width, height, sourceFrames)
-        println("PIPELINE: clip ready in ${System.currentTimeMillis() - startedAt} ms (${input.length()} octets)")
-        assertTrue("clip de test non généré", input.length() > 2000)
+        println("PIPELINE: clip ready in ${System.currentTimeMillis() - startedAt} ms (${input.length()} bytes)")
+        assertTrue("test clip was not produced", input.length() > 2000)
 
         val inputInfo = VideoInfo.read(context, Uri.fromFile(input))
-        assertNotNull("métadonnées d'entrée illisibles", inputInfo)
+        assertNotNull("input metadata unreadable", inputInfo)
         assertEquals(width, inputInfo!!.displayWidth)
         assertEquals(height, inputInfo.displayHeight)
 
@@ -130,22 +132,75 @@ class PipelineEndToEndTest {
         val result = interpolator.process(Uri.fromFile(input), "input.mp4")
         println("PIPELINE: pipeline finished in ${System.currentTimeMillis() - startedAt} ms")
 
-        assertNotNull("aucune sortie", result.path)
+        assertNotNull("no output path", result.path)
         val output = File(result.path!!)
-        assertTrue("sortie vide (${output.length()} octets)", output.length() > 2000)
+        assertTrue("empty output (${output.length()} bytes)", output.length() > 2000)
         assertEquals(1f, lastProgress, 0.001f)
 
         val outInfo = VideoInfo.read(context, Uri.fromFile(output))
-        assertNotNull("sortie illisible", outInfo)
+        assertNotNull("output unreadable", outInfo)
         assertEquals(width, outInfo!!.displayWidth)
         assertEquals(height, outInfo.displayHeight)
 
         // n source frames at 30 fps → 2n-1 frames at 60 fps over the same duration.
         val expected = sourceFrames * 2 - 1
-        assertTrue("images écrites: ${result.frames} (attendu $expected)", result.frames in (expected - 1)..(expected + 1))
+        assertTrue(
+            "frames written: ${result.frames} (expected $expected)",
+            result.frames in (expected - 1)..(expected + 1)
+        )
         assertEquals((sourceFrames - 1) / 30.0, outInfo.durationSeconds, 0.2)
         assertEquals(60.0, outInfo.fps, 6.0)
+        // A short output is the symptom of a codec that gave up early, and the pipeline now logs it.
+        assertTrue(
+            "pipeline reported a truncated output:\n${log.joinToString("\n")}",
+            log.none { it.contains("Output covers") }
+        )
 
-        println("PIPELINE OK: ${result.label} — ${result.frames} images, ${output.length()} octets")
+        println("PIPELINE OK: ${result.label} — ${result.frames} frames, ${output.length()} bytes")
+    }
+
+    /**
+     * The decoder used to report "no output for 15 s" as the end of the stream, which wrote a
+     * truncated file with no error. This pins both halves of the fix: a normal clip must end with
+     * [VideoDecoder.Result.EndOfStream], and every source frame must come out of it.
+     */
+    @Test
+    fun decoderReachesTheEndOfStreamWithoutLosingFrames() {
+        val dir = File(context.cacheDir, "e2e").apply { mkdirs() }
+        val args = InstrumentationRegistry.getArguments()
+        val width = args.getString("width")?.toIntOrNull() ?: 96
+        val height = args.getString("height")?.toIntOrNull() ?: 64
+        val sourceFrames = args.getString("frames")?.toIntOrNull() ?: 4
+
+        val input = makeTestClip(File(dir, "decode.mp4"), width, height, sourceFrames)
+
+        ParcelFileDescriptor.open(input, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
+            VideoDecoder(
+                fd = pfd.fileDescriptor,
+                targetWidth = width,
+                targetHeight = height,
+                rotation = 0,
+                initialSpec = YuvConverter.BT709_LIMITED,
+                log = logSink
+            ).use { decoder ->
+                val argb = IntArray(width * height)
+                var decoded = 0
+                var last: VideoDecoder.Result = VideoDecoder.Result.Stalled
+                while (true) {
+                    last = decoder.decodeNext(argb)
+                    if (last is VideoDecoder.Result.Frame) {
+                        decoded++
+                        continue
+                    }
+                    break
+                }
+                println("PIPELINE: decoder read $decoded frame(s), ended with $last")
+                assertTrue(
+                    "the decoder stalled instead of reaching the end of the stream: $last",
+                    last is VideoDecoder.Result.EndOfStream
+                )
+                assertTrue("decoded $decoded frame(s) out of $sourceFrames", decoded >= sourceFrames - 1)
+            }
+        }
     }
 }

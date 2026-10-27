@@ -32,7 +32,7 @@ class RifeEngine(
     frameHeight: Int = 0,
     profileDir: File? = null,
     private val log: (String) -> Unit = {}
-) : AutoCloseable {
+) : InferenceEngine() {
 
     /** Two separate frame inputs (`img0`/`img1`) instead of one 6-channel tensor. */
     private val splitFrames: Boolean
@@ -139,7 +139,7 @@ class RifeEngine(
      * @param frame1 planar RGB, size 3*width*height
      * @param out planar RGB result, size 3*width*height
      */
-    fun interpolate(frame0: FloatArray, frame1: FloatArray, width: Int, height: Int, t: Float, out: FloatArray) {
+    override fun interpolate(frame0: FloatArray, frame1: FloatArray, width: Int, height: Int, t: Float, out: FloatArray) {
         val planeSize = width * height
         require(frame0.size >= planeSize * 3 && frame1.size >= planeSize * 3) { "frame buffers too small" }
         require(out.size >= planeSize * 3) { "output buffer too small" }
@@ -208,7 +208,7 @@ class RifeEngine(
      * Stops ONNX Runtime profiling and returns the heaviest operators, heaviest first.
      * Format: `GridSample 137.2 ms (14 calls)`.
      */
-    fun stopProfiling(top: Int = 8): List<String> {
+    override fun stopProfiling(top: Int): List<String> {
         val path = profileFile ?: return emptyList()
         val json = runCatching { session.endProfiling() }.getOrNull() ?: path
         val file = File(json)

@@ -1,16 +1,19 @@
 package com.flowframes.android.core
 
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The parallel pipeline is only worth its complexity if it is exactly equivalent to the sequential
- * one. These tests run the real model through one session and through a pool of three, and compare
- * the frames byte for byte.
+ * one and if a session never runs two inferences at once. The first two tests run the real model
+ * through one session and through a pool of three and compare the frames byte for byte; the last
+ * one uses fake engines, because the scheduling contract has to be checked without a model.
  */
 class InferencePoolTest {
 
@@ -79,6 +82,82 @@ class InferencePoolTest {
                     val same = outs[i].indices.all { outs[i][it] == outs[0][it] }
                     assertTrue("phase 0.9 in buffer $i produced the same pixels as phase 0.1", !same)
                 }
+            }
+        }
+    }
+
+    /** Fake engine that records how many inferences it is running at the same time. */
+    private class FakeEngine(private val delayMs: Long, private val shared: Shared) : InferenceEngine() {
+
+        /** Inferences in flight on **this** engine, and the highest value ever seen. */
+        private val mine = AtomicInteger()
+        val peakMine = AtomicInteger()
+
+        /** Counters shared by every engine of the test. */
+        class Shared {
+            /** Inferences in flight across every engine, and the highest value ever seen. */
+            val total = AtomicInteger()
+            val peakTotal = AtomicInteger()
+
+            val runs = AtomicInteger()
+        }
+
+        override fun close() {}
+
+        override fun interpolate(
+            frame0: FloatArray,
+            frame1: FloatArray,
+            width: Int,
+            height: Int,
+            t: Float,
+            out: FloatArray
+        ) {
+            shared.runs.incrementAndGet()
+            val mineNow = mine.incrementAndGet()
+            peakMine.accumulateAndGet(mineNow) { a, b -> maxOf(a, b) }
+            val totalNow = shared.total.incrementAndGet()
+            shared.peakTotal.accumulateAndGet(totalNow) { a, b -> maxOf(a, b) }
+            try {
+                Thread.sleep(delayMs)
+                // Every engine writes its phase, so the test can prove which task filled which buffer.
+                java.util.Arrays.fill(out, t)
+            } finally {
+                shared.total.decrementAndGet()
+                mine.decrementAndGet()
+            }
+        }
+    }
+
+    @Test
+    fun `a session never runs two inferences at the same time`() {
+        // The pool used to be one fixed worker pool with round-robin engine assignment: the task
+        // submitted second could start first and land on a session that was still busy, which loses
+        // exactly the isolation the measured 2.1x throughput depends on. One thread per session
+        // makes that impossible, and the counters below fail the test if it ever comes back.
+        val shared = FakeEngine.Shared()
+        val engines = List(3) { FakeEngine(delayMs = 30, shared = shared) }
+
+        InferencePool(engines, threadsPerWorker = 2).use { pool ->
+            val outs = List(3) { FloatArray(4) }
+            val futures = outs.indices.map { index ->
+                pool.submit(FloatArray(4), FloatArray(4), 2, 2, index / 3f, outs[index])
+            }
+            futures.forEach { it.get() }
+
+            engines.forEachIndexed { index, engine ->
+                assertEquals("session $index ran two inferences at once", 1, engine.peakMine.get())
+            }
+            assertEquals("the pool reported a session overlap", 1, pool.peakConcurrencyPerSession)
+            // At least two sessions must have worked at the same time, otherwise the pool has
+            // silently become sequential.
+            assertTrue(
+                "no two sessions ran at the same time (peak ${shared.peakTotal.get()})",
+                shared.peakTotal.get() >= 2
+            )
+            assertEquals(3, shared.runs.get())
+            // Round-robin: one task per session, each one written into its own buffer.
+            outs.forEachIndexed { index, out ->
+                assertArrayEquals("buffer $index", FloatArray(4) { index / 3f }, out, 0f)
             }
         }
     }

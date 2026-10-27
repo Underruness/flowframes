@@ -222,7 +222,12 @@ class Interpolator(
                     )
 
                     frames = runLoop(pool, decoder, encoder!!, info, targetW, targetH, factor, srcFps)
-                    encoder.finishVideo()
+                    val finish = encoder.finishVideo()
+                    if (finish != VideoEncoder.Finish.COMPLETE) {
+                        // The wait for the end-of-stream marker is time-boxed on purpose (some encoders
+                        // never report it), so the tail of the file may be missing: say it out loud.
+                        log("⚠ Encoder did not confirm the end of the stream ($finish): the end of the output may be incomplete")
+                    }
                     if (encoder.hasAudio) copyAudio(inputUri, encoder, log)
                 } finally {
                     runCatching { decoder?.close() }
@@ -334,11 +339,21 @@ class Interpolator(
 
         while (true) {
             checkCancelled()
-            val frame = timing.decode {
-                val f = decoder.decodeNext(cur) ?: return@decode null
-                FrameMath.argbToPlanar(cur, curPlanar)
-                f
-            } ?: break
+            val decodedResult = timing.decode {
+                val result = decoder.decodeNext(cur)
+                if (result is VideoDecoder.Result.Frame) FrameMath.argbToPlanar(cur, curPlanar)
+                result
+            }
+            if (decodedResult is VideoDecoder.Result.Stalled) {
+                // Treating a stall as the end of the stream is how a truncated video used to be
+                // written without any error: fail loudly, and let the caller drop the partial file.
+                throw IllegalStateException(
+                    "The decoder stopped producing frames after $decoded frame(s) (${width}x$height, " +
+                        "${info.mime}). Lower the processing resolution, or convert the source to a " +
+                        "codec this device decodes in hardware."
+                )
+            }
+            val frame = decodedResult as? VideoDecoder.Result.Frame ?: break
             decoded++
 
             if (decoded == heatCheckAfter) {
@@ -428,6 +443,17 @@ class Interpolator(
 
         if (skippedDuplicates > 0) log("Deduplication: $skippedDuplicates duplicate frame(s) skipped")
         if (cuts > 0) log("Scene changes: $cuts cut(s) passed through without interpolation")
+        // An output that covers much less than the source is the visible symptom of a codec that
+        // gave up early. It must never pass as a normal result.
+        if (info.durationUs > 0 && lastPts > 0 && lastPts < info.durationUs * 9 / 10) {
+            log(
+                String.format(
+                    Locale.US,
+                    "⚠ Output covers %.1f s of the %.1f s source — the codec stopped early.",
+                    lastPts / 1_000_000.0, info.durationSeconds
+                )
+            )
+        }
 
         val loopStart = firstPlanar
         if (settings.loop && decoded > 1 && loopStart != null) {

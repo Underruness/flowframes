@@ -82,6 +82,9 @@ object EngineBenchmark {
         configs += Config("4 × 2T", workers = 4, threadsPerWorker = 2)
         configs += Config("XNNPACK 3 × ${perWorker}T", workers = 3, threadsPerWorker = perWorker, xnnpack = true)
         configs += Config("3 × ${perWorker}T dynamic shapes", workers = 3, threadsPerWorker = perWorker, staticShapes = false)
+        // ONNX Runtime's PARALLEL execution mode is exposed in the settings, so it is measured here
+        // instead of being taken on faith: it stayed off by default while nothing could check it.
+        configs += Config("3 × ${perWorker}T parallel ops", workers = 3, threadsPerWorker = perWorker, parallel = true)
         if (settings.useNnapi) {
             configs += Config("NNAPI 3 × ${perWorker}T", workers = 3, threadsPerWorker = perWorker, xnnpack = true, nnapi = true, rounds = 1)
         }

@@ -19,16 +19,16 @@ class UiSmokeTest {
     @Test
     fun queueAndSettingsScreensRender() {
         rule.onNodeWithText("FlowFrames").assertExists()
-        rule.onNodeWithText("Aucune vidéo en file").assertExists()
-        rule.onNodeWithText("Ajouter").assertExists()
-        rule.onNodeWithText("Démarrer").assertExists()
+        rule.onNodeWithText("No video in the queue").assertExists()
+        rule.onNodeWithText("Add videos").assertExists()
+        rule.onNodeWithText("Start").assertExists()
 
-        rule.onNodeWithContentDescription("Réglages").performClick()
-        rule.onNodeWithText("Réglages").assertExists()
-        rule.onNodeWithText("Facteur").assertExists()
-        rule.onNodeWithText("Qualité du modèle").assertExists()
+        rule.onNodeWithContentDescription("Settings").performClick()
+        rule.onNodeWithText("Settings").assertExists()
+        rule.onNodeWithText("Multiplier").assertExists()
+        rule.onNodeWithText("Model quality").assertExists()
 
-        rule.onNodeWithContentDescription("Retour").performClick()
-        rule.onNodeWithText("Ajouter").assertExists()
+        rule.onNodeWithContentDescription("Back").performClick()
+        rule.onNodeWithText("Add videos").assertExists()
     }
 }
