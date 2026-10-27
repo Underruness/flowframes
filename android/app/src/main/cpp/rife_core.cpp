@@ -9,6 +9,7 @@
 #include "gpu.h"
 #include "layer.h"
 #include "rife_ops.h"
+#include "shader_cache.h"
 
 DEFINE_LAYER_CREATOR(Warp)
 
@@ -17,7 +18,10 @@ namespace flowframes {
 static std::once_flag g_gpuOnce;
 
 void ensureGpuInstance() {
-    std::call_once(g_gpuOnce, [] { ncnn::create_gpu_instance(); });
+    std::call_once(g_gpuOnce, [] {
+        ncnn::create_gpu_instance();
+        installPipelineCacheHook();
+    });
 }
 
 int RifeCore::gpuCount() {
@@ -116,6 +120,8 @@ int RifeCore::load(const RifeConfig& config, std::string& error) {
         return -3;
     }
     loaded = true;
+    // ncnn builds every layer's pipeline in load_model: persist them before the first frame.
+    if (vkdev) flushShaderCaches();
     return 0;
 }
 
@@ -141,6 +147,95 @@ void RifeCore::fillPadded(const float* planar, int width, int height, ncnn::Mat&
     }
 }
 
+// Android ARGB ints (0xAARRGGBB) straight into the padded planar float input: the Java side
+// keeps 8-bit frames (4 bytes per pixel instead of 12), which is what makes 1440p and 4K fit.
+void RifeCore::fillPaddedArgb(const uint32_t* argb, int width, int height, ncnn::Mat& dst) const {
+    const float inv = 1.f / 255.f;
+    float* r = dst.channel(0);
+    float* g = dst.channel(1);
+    float* b = dst.channel(2);
+    for (int y = 0; y < dst.h; y++) {
+        float* rr = r + (size_t)y * dst.w;
+        float* gg = g + (size_t)y * dst.w;
+        float* bb = b + (size_t)y * dst.w;
+        if (y >= height) {
+            memset(rr, 0, sizeof(float) * dst.w);
+            memset(gg, 0, sizeof(float) * dst.w);
+            memset(bb, 0, sizeof(float) * dst.w);
+            continue;
+        }
+        const uint32_t* src = argb + (size_t)y * width;
+        for (int x = 0; x < width; x++) {
+            const uint32_t c = src[x];
+            rr[x] = (float)((c >> 16) & 0xFF) * inv;
+            gg[x] = (float)((c >> 8) & 0xFF) * inv;
+            bb[x] = (float)(c & 0xFF) * inv;
+        }
+        for (int x = width; x < dst.w; x++) rr[x] = gg[x] = bb[x] = 0.f;
+    }
+}
+
+int RifeCore::run(const ncnn::Mat& in0, const ncnn::Mat& in1, int width, int height, float timestep,
+                  ncnn::Mat& result) const {
+    ncnn::Mat ts(in0.w, in0.h, 1);
+    if (ts.empty()) return -100;
+    ts.fill(timestep);
+    {
+        ncnn::Extractor ex = flownet.create_extractor();
+        if (ex.input("in0", in0) != 0) return -2;
+        if (ex.input("in1", in1) != 0) return -2;
+        if (ex.input("in2", ts) != 0) return -2;
+        int ret = ex.extract("out0", result);
+        if (ret != 0) return -3;
+    }
+    if (result.empty() || result.c != 3 || result.w < width || result.h < height) return -4;
+    if (result.elemsize != 4 || result.elempack != 1) return -5;
+    return 0;
+}
+
+int RifeCore::interpolateArgb(const uint32_t* frame0, const uint32_t* frame1, int width, int height,
+                              float timestep, uint32_t* out) const {
+    if (!loaded) return -1;
+    const size_t plane = (size_t)width * height;
+    if (timestep <= 0.f) {
+        memcpy(out, frame0, sizeof(uint32_t) * plane);
+        return 0;
+    }
+    if (timestep >= 1.f) {
+        memcpy(out, frame1, sizeof(uint32_t) * plane);
+        return 0;
+    }
+    const int pad = cfg.padding;
+    const int wp = (width + pad - 1) / pad * pad;
+    const int hp = (height + pad - 1) / pad * pad;
+    ncnn::Mat in0(wp, hp, 3);
+    ncnn::Mat in1(wp, hp, 3);
+    if (in0.empty() || in1.empty()) return -100;
+    fillPaddedArgb(frame0, width, height, in0);
+    fillPaddedArgb(frame1, width, height, in1);
+    ncnn::Mat result;
+    int ret = run(in0, in1, width, height, timestep, result);
+    if (ret != 0) return ret;
+    const float* r = result.channel(0);
+    const float* g = result.channel(1);
+    const float* b = result.channel(2);
+    for (int y = 0; y < height; y++) {
+        const size_t row = (size_t)y * result.w;
+        uint32_t* d = out + (size_t)y * width;
+        for (int x = 0; x < width; x++) {
+            // Same rounding as FrameMath.planarToArgb: round half up, clamp to [0, 255].
+            int rr = (int)(r[row + x] * 255.f + 0.5f);
+            int gg = (int)(g[row + x] * 255.f + 0.5f);
+            int bb = (int)(b[row + x] * 255.f + 0.5f);
+            rr = rr < 0 ? 0 : (rr > 255 ? 255 : rr);
+            gg = gg < 0 ? 0 : (gg > 255 ? 255 : gg);
+            bb = bb < 0 ? 0 : (bb > 255 ? 255 : bb);
+            d[x] = 0xFF000000u | ((uint32_t)rr << 16) | ((uint32_t)gg << 8) | (uint32_t)bb;
+        }
+    }
+    return 0;
+}
+
 int RifeCore::interpolate(const float* frame0, const float* frame1, int width, int height,
                           float timestep, float* out) const {
     if (!loaded) return -1;
@@ -160,23 +255,12 @@ int RifeCore::interpolate(const float* frame0, const float* frame1, int width, i
 
     ncnn::Mat in0(wp, hp, 3);
     ncnn::Mat in1(wp, hp, 3);
-    ncnn::Mat ts(wp, hp, 1);
-    if (in0.empty() || in1.empty() || ts.empty()) return -100;
+    if (in0.empty() || in1.empty()) return -100;
     fillPadded(frame0, width, height, in0);
     fillPadded(frame1, width, height, in1);
-    ts.fill(timestep);
-
     ncnn::Mat result;
-    {
-        ncnn::Extractor ex = flownet.create_extractor();
-        if (ex.input("in0", in0) != 0) return -2;
-        if (ex.input("in1", in1) != 0) return -2;
-        if (ex.input("in2", ts) != 0) return -2;
-        int ret = ex.extract("out0", result);
-        if (ret != 0) return -3;
-    }
-    if (result.empty() || result.c != 3 || result.w < width || result.h < height) return -4;
-    if (result.elemsize != 4 || result.elempack != 1) return -5;
+    int ret = run(in0, in1, width, height, timestep, result);
+    if (ret != 0) return ret;
 
     for (int c = 0; c < 3; c++) {
         const float* src = result.channel(c);

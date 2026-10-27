@@ -9,13 +9,14 @@ import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import androidx.documentfile.provider.DocumentFile
 import com.flowframes.android.core.DeviceInfo
-import com.flowframes.android.core.FloatArrayPool
+import com.flowframes.android.core.IntArrayPool
 import com.flowframes.android.core.FrameMath
 import com.flowframes.android.core.InferencePool
 import com.flowframes.android.core.InterpPlan
 import com.flowframes.android.core.LatencyStats
 import com.flowframes.android.core.Naming
 import com.flowframes.android.core.OrderedWindow
+import com.flowframes.android.core.OutputTimeline
 import com.flowframes.android.video.VideoDecoder
 import com.flowframes.android.video.VideoEncoder
 import com.flowframes.android.video.VideoInfo
@@ -25,16 +26,27 @@ import java.util.Locale
 class JobCancelledException : Exception("Job cancelled")
 
 /**
- * One source pair in flight: its two frames (owned copies, so the decoder can move on), the
- * interpolated frames being produced by the pool, and the futures that fill them.
+ * A decoded source frame (8-bit ARGB). It is shared, without copies, by the two pairs it belongs
+ * to and goes back to the pool when the last one is written.
+ */
+private class SourceFrame(val px: IntArray, private val pool: IntArrayPool) {
+    private var refs = 1
+    fun retain(): SourceFrame { refs++; return this }
+    fun release() {
+        if (--refs == 0) pool.release(px)
+    }
+}
+
+/**
+ * One source interval in flight: its two frames, the output frames due in it, and the inferences
+ * filling the ones that need the model (null for frames that are a source frame).
  */
 private class PendingPair(
-    val startPts: Long,
-    val endPts: Long,
-    val first: FloatArray,
-    val second: FloatArray,
-    val frames: List<FloatArray>,
-    val futures: List<java.util.concurrent.Future<*>>
+    val first: SourceFrame,
+    val second: SourceFrame,
+    val items: List<OutputTimeline.Item>,
+    val frames: List<IntArray?>,
+    val futures: List<java.util.concurrent.Future<*>?>
 )
 
 /**
@@ -138,6 +150,8 @@ class Interpolator(
             ?: throw IllegalStateException("Cannot read this video (unsupported format)")
 
         log(DeviceInfo.headline(context))
+        log("Sensors: ${SystemMonitor.zoneSummary()}")
+        log("Start: ${SystemMonitor.sample(context).shortLine()}")
         log(
             "Source: ${info.width}x${info.height}" +
                 (if (info.rotation != 0) " (rotation ${info.rotation}°)" else "") +
@@ -147,18 +161,31 @@ class Interpolator(
         val cap = settings.maxLongSide
         val (targetW, targetH) = FrameMath.fitWithin(info.displayWidth, info.displayHeight, cap, cap)
         val srcFps = if (info.fps > 0.5) info.fps else 30.0
-        val factor = InterpPlan.effectiveFactor(settings.factor, srcFps, settings.maxOutputFps)
-        val outFps = srcFps * factor
-        if (factor != settings.factor) {
-            log("Multiplier reduced from x${settings.factor} to x$factor to stay under ${settings.maxOutputFps.toInt()} fps")
+        val timeline: OutputTimeline
+        if (settings.targetFps > 0.0) {
+            timeline = OutputTimeline.targetFps(settings.targetFps)
+            log(
+                "Target ${fmt(settings.targetFps)} fps from ${fmt(srcFps)} fps " +
+                    "(x${fmt(settings.targetFps / srcFps)}, up to ${timeline.maxInferencesPerPair(srcFps)} inference(s) per source frame)"
+            )
+            if (settings.targetFps < srcFps) log("Target below the source rate: frames are dropped, nothing is interpolated")
+        } else {
+            val f = InterpPlan.effectiveFactor(settings.factor, srcFps, settings.maxOutputFps)
+            if (f != settings.factor) {
+                log("Multiplier reduced from x${settings.factor} to x$f to stay under ${settings.maxOutputFps.toInt()} fps")
+            }
+            timeline = OutputTimeline.multiplier(f)
         }
-        log("Processing at ${targetW}x$targetH, output ${fmt(outFps)} fps (x$factor)")
+        val outFps = timeline.outputFps(srcFps)
+        val factor = if (timeline.isTarget) kotlin.math.ceil(outFps / srcFps).toInt().coerceAtLeast(1) else timeline.factor
+        log("Processing at ${targetW}x$targetH, output ${fmt(outFps)} fps (" +
+            (if (timeline.isTarget) "target" else "x$factor") + ")")
 
         val codec = if (VideoEncoder.isEncoderAvailable(settings.codec.mime)) settings.codec else {
             log("${settings.codec.label} encoder unavailable on this device → H.264")
             OutputCodec.H264
         }
-        val bitrate = VideoEncoder.bitrateFor(targetW, targetH, outFps.toInt(), settings.bitratePreset)
+        val bitrate = VideoEncoder.bitrateFor(targetW, targetH, kotlin.math.round(outFps).toInt(), settings.bitratePreset)
 
         val baseName = Naming.build(settings.namePattern, displayName, factor, outFps, codec.label)
         val outTarget = createOutput(baseName)
@@ -170,7 +197,7 @@ class Interpolator(
                 log("Audio track unreadable, output will be silent")
             }
 
-            log("${settings.factor - 1} inference(s) per source frame · engine setting: ${settings.engine.label}")
+            log("Engine setting: ${settings.engine.label}")
             if (settings.useNnapi && EngineFactory.chain(settings).first() == EngineKind.ORT_CPU) {
                 log("NNAPI requested: it was 6x slower than the CPU on a Snapdragon 8 Elite. Run the benchmark to compare on this device.")
             }
@@ -182,6 +209,10 @@ class Interpolator(
                 height = targetH,
                 log = log
             ).use { pool ->
+                if (pool.distinctEngines.any { it is com.flowframes.android.core.NcnnRifeEngine }) {
+                    com.flowframes.android.core.NcnnRifeEngine.shaderCacheStats().takeIf { it.isNotBlank() }
+                        ?.let { log("GPU cache: $it") }
+                }
                 val outPfd = outTarget.fd
                 val inPfd = context.contentResolver.openFileDescriptor(inputUri, "r")
                     ?: throw IllegalStateException("Cannot open the source video")
@@ -196,7 +227,7 @@ class Interpolator(
                         height = targetH,
                         mime = codec.mime,
                         bitrate = bitrate,
-                        frameRate = outFps.toInt().coerceIn(1, 480),
+                        frameRate = kotlin.math.round(outFps).toInt().coerceIn(1, 480),
                         spec = info.colorSpec,
                         audioFormat = audioFormat,
                         log = log
@@ -210,7 +241,7 @@ class Interpolator(
                         log = log
                     )
 
-                    frames = runLoop(pool, decoder, encoder!!, info, targetW, targetH, factor, srcFps)
+                    frames = runLoop(pool, decoder, encoder!!, info, targetW, targetH, timeline, srcFps)
                     encoder.finishVideo()
                     if (encoder.hasAudio) copyAudio(inputUri, encoder, log)
                 } finally {
@@ -264,34 +295,29 @@ class Interpolator(
         info: VideoInfo,
         width: Int,
         height: Int,
-        factor: Int,
+        timeline: OutputTimeline,
         srcFps: Double
     ): Int {
         val pixels = width * height
-        val planeSize = pixels * 3
-        val buffers = FloatArrayPool(planeSize)
-        var prev = IntArray(pixels)
-        var cur = IntArray(pixels)
-        var prevPlanar = FloatArray(planeSize)
-        var curPlanar = FloatArray(planeSize)
+        val frameBytes = pixels * 4L
+        val perPairInfer = timeline.maxInferencesPerPair(srcFps)
 
-        var firstPlanar: FloatArray? = null
+        var firstFrame: SourceFrame? = null
+        var prev: SourceFrame? = null
         var lastPts = 0L
         var firstPts = 0L
-        var havePrev = false
         var decoded = 0
         var written = 0
         var skippedDuplicates = 0
         var cuts = 0
         var interpolatedPairs = 0
-        val phases = InterpPlan.phases(factor)
+        var inferences = 0
         val planOptions = settings.planOptions()
         val timing = StageTiming()
         val wallStart = System.nanoTime()
         val expectedFrames = if (info.durationUs > 0) {
             (info.durationSeconds * srcFps).toInt().coerceAtLeast(1)
         } else 1000
-        // A 576x576 RIFE pass costs a few hundred ms on current phones, so 30 s in is enough.
         val heatCheckAfter = 90
         // A long job is where throttling shows up, so the log gets a heartbeat every minute.
         val heartbeatEveryNs = 60_000_000_000L
@@ -300,54 +326,70 @@ class Interpolator(
 
         pool.onInference = { ns -> timing.recordInference(ns) }
 
-        // Interpolated frames are produced out of order by the pool and encoded in order here.
-        // The window bounds how far the decoder runs ahead: one pair in flight holds its two source
-        // frames plus one output per phase, so a 1080p job has to keep the window short.
-        val bytesPerPair = (2L + phases.size) * planeSize * 4
-        // Frames are Java-heap FloatArrays, so the window is budgeted against the heap this app was
-        // given (largeHeap), never against the phone's RAM: at 1080p one pair is already ~130 MB.
+        // Frames are 8-bit ARGB IntArrays (4 bytes/pixel; the float planes the model needs only
+        // exist inside the engine), and each source frame is shared by its two pairs. One pair in
+        // flight costs one new source frame plus its interpolated outputs: ~33 MB per frame at 4K,
+        // where the old float pipeline needed ~100 MB per frame and ran out of heap above 1080p.
+        val bytesPerPair = (1L + perPairInfer) * frameBytes
         val heapBudget = Runtime.getRuntime().maxMemory() / 2
-        // Hybrid GPU + CPU: a CPU phase takes several GPU phases' time and the encoder waits for it
-        // in order, so the GPU needs more pairs ahead to stay busy meanwhile.
         val hybrid = pool.distinctEngines.size > 1
         val capacity = (heapBudget / bytesPerPair.coerceAtLeast(1L)).toInt()
             .coerceIn(1, if (hybrid) maxOf(4, pool.workers * 2) else maxOf(2, pool.workers))
+        val buffers = IntArrayPool(pixels, maxFree = (capacity + 2) * (perPairInfer + 1) + 2)
         val window = OrderedWindow<PendingPair>(capacity) { pair ->
-            written += encodePair(encoder, pair, phases, timing)
-            buffers.release(pair.first)
-            buffers.release(pair.second)
-            pair.frames.forEach { buffers.release(it) }
+            written += encodePair(encoder, pair, timing)
+            pair.frames.forEach { if (it != null) buffers.release(it) }
+            pair.first.release()
+            pair.second.release()
         }
         log(
             "Pipeline: ${pool.workers} inference session(s) × ${pool.threadsPerWorker} threads " +
                 "(${pool.totalThreads} total) · window of $capacity pair(s) · " +
-                "${bytesPerPair * capacity / (1024 * 1024)} MB of frame buffers"
+                "${(bytesPerPair * capacity + 2 * frameBytes) / (1024 * 1024)} MB of frame buffers " +
+                "(heap ${heapMaxMb()} MB)"
         )
+
+        fun submitPair(a: SourceFrame, b: SourceFrame, items: List<OutputTimeline.Item>) {
+            val frames = ArrayList<IntArray?>(items.size)
+            val futures = ArrayList<java.util.concurrent.Future<*>?>(items.size)
+            for (item in items) {
+                if (item.needsInference) {
+                    checkCancelled()
+                    val out = buffers.acquire()
+                    frames += out
+                    futures += pool.submitArgb(a.px, b.px, width, height, item.t.toFloat(), out)
+                    inferences++
+                } else {
+                    frames += null
+                    futures += null
+                }
+            }
+            window.offer(PendingPair(a.retain(), b.retain(), items, frames, futures))
+        }
 
         while (true) {
             checkCancelled()
-            val frame = timing.decode {
-                val f = decoder.decodeNext(cur) ?: return@decode null
-                FrameMath.argbToPlanar(cur, curPlanar)
-                f
-            } ?: break
+            val cur = SourceFrame(buffers.acquire(), buffers)
+            val frame = timing.decode { decoder.decodeNext(cur.px) }
+            if (frame == null) {
+                cur.release()
+                break
+            }
             decoded++
 
             if (decoded == heatCheckAfter) {
-                log("Thermal status after $decoded frames: ${thermal()}")
+                log("Thermal status after $decoded frames: ${thermal()} · ${SystemMonitor.sample(context).shortLine()}")
             }
 
-            if (!havePrev) {
-                timing.encode { encoder.encodePlanar(curPlanar, frame.ptsUs) }
-                written++
-                System.arraycopy(cur, 0, prev, 0, pixels)
-                System.arraycopy(curPlanar, 0, prevPlanar, 0, planeSize)
+            val before = prev
+            if (before == null) {
                 firstPts = frame.ptsUs
+                timeline.originUs = frame.ptsUs
+                timing.encode { encoder.encode(cur.px, frame.ptsUs) }
+                written++
                 lastPts = frame.ptsUs
-                havePrev = true
-                if (settings.loop) {
-                    firstPlanar = curPlanar.copyOf()
-                }
+                prev = cur
+                if (settings.loop) firstFrame = cur.retain()
                 onProgress(
                     (0.98f * decoded / expectedFrames.toFloat()).coerceIn(0f, 0.5f),
                     "Frame $decoded/$expectedFrames"
@@ -355,39 +397,27 @@ class Interpolator(
                 continue
             }
 
-            // One pass computes both metrics the dedupe/scene logic needs.
-            val (lumaDiff, changed) = FrameMath.lumaStats(prev, cur, 0.08)
-            when (InterpPlan.decide(prev, cur, planOptions, lumaDiff, changed)) {
+            val (lumaDiff, changed) = FrameMath.lumaStats(before.px, cur.px, 0.08)
+            when (InterpPlan.decide(before.px, cur.px, planOptions, lumaDiff, changed)) {
                 InterpPlan.Decision.SKIP_DUPLICATE -> {
                     skippedDuplicates++
-                    // keep the previous frame, drop this duplicate
+                    cur.release()
                 }
 
                 InterpPlan.Decision.CUT -> {
                     cuts++
-                    // Everything queued must be written before the cut frame, or the output is
-                    // out of order around the cut.
-                    window.drain()
-                    timing.encode { encoder.encodePlanar(curPlanar, frame.ptsUs) }
-                    written++
-                    adopt(cur, curPlanar, prev, prevPlanar, pixels)
+                    // Goes through the window like any pair, so the order is kept without draining.
+                    submitPair(before, cur, timeline.cut(lastPts, frame.ptsUs))
+                    before.release()
+                    prev = cur
                     lastPts = frame.ptsUs
                 }
 
                 InterpPlan.Decision.INTERPOLATE -> {
                     interpolatedPairs++
-                    val first = buffers.acquire().also { System.arraycopy(prevPlanar, 0, it, 0, planeSize) }
-                    val second = buffers.acquire().also { System.arraycopy(curPlanar, 0, it, 0, planeSize) }
-                    val frames = ArrayList<FloatArray>(phases.size)
-                    val futures = ArrayList<java.util.concurrent.Future<*>>(phases.size)
-                    for (t in phases) {
-                        checkCancelled()
-                        val out = buffers.acquire()
-                        frames += out
-                        futures += pool.submit(first, second, width, height, t.toFloat(), out)
-                    }
-                    window.offer(PendingPair(lastPts, frame.ptsUs, first, second, frames, futures))
-                    adopt(cur, curPlanar, prev, prevPlanar, pixels)
+                    submitPair(before, cur, timeline.between(lastPts, frame.ptsUs))
+                    before.release()
+                    prev = cur
                     lastPts = frame.ptsUs
                 }
             }
@@ -405,9 +435,10 @@ class Interpolator(
                     String.format(
                         Locale.US,
                         "Progress: %d frames (%d out) · %.2f source fps overall · %.2f fps over the last %.0f s · " +
-                            "inference %.0f ms/frame over the last minute · thermal %s · heap %d/%d MB",
+                            "inference %.0f ms/frame over the last minute · thermal %s · heap %d/%d MB · %s",
                         decoded, written, timing.rate(decoded).toDoubleOrNull() ?: 0.0, instant, beatSeconds,
-                        timing.recentInferenceMs(), thermal(), heapUsedMb(), heapMaxMb()
+                        timing.recentInferenceMs(), thermal(), heapUsedMb(), heapMaxMb(),
+                        SystemMonitor.sample(context).shortLine()
                     )
                 )
                 lastBeatNs = now
@@ -415,38 +446,21 @@ class Interpolator(
             }
         }
 
+        val loopStart = firstFrame
+        val last = prev
+        if (settings.loop && decoded > 1 && loopStart != null && last != null) {
+            val avgSpan = (lastPts - firstPts) / (decoded - 1).coerceAtLeast(1)
+            log("Loop interpolation (last → first frame)")
+            submitPair(last, loopStart, timeline.between(lastPts, lastPts + avgSpan.coerceAtLeast(1L)))
+        }
         window.drain()
+        loopStart?.release()
+        last?.release()
         pool.onInference = null
         log("Work split: ${pool.engineStats()}")
 
         if (skippedDuplicates > 0) log("Deduplication: $skippedDuplicates duplicate frame(s) skipped")
         if (cuts > 0) log("Scene changes: $cuts cut(s) passed through without interpolation")
-
-        val loopStart = firstPlanar
-        if (settings.loop && decoded > 1 && loopStart != null) {
-            val avgSpan = if (decoded > 1) (lastPts - firstPts) / (decoded - 1) else 33_333L
-            log("Loop interpolation (last → first frame)")
-            val first = buffers.acquire().also { System.arraycopy(prevPlanar, 0, it, 0, planeSize) }
-            val second = buffers.acquire().also { System.arraycopy(loopStart, 0, it, 0, planeSize) }
-            val frames = ArrayList<FloatArray>(phases.size)
-            val futures = ArrayList<java.util.concurrent.Future<*>>(phases.size)
-            pool.onInference = { ns -> timing.recordInference(ns) }
-            for (t in phases) {
-                checkCancelled()
-                val out = buffers.acquire()
-                frames += out
-                futures += pool.submit(first, second, width, height, t.toFloat(), out)
-            }
-            val tail = OrderedWindow<PendingPair>(1) { pair ->
-                written += encodePair(encoder, pair, phases, timing)
-                buffers.release(pair.first)
-                buffers.release(pair.second)
-                pair.frames.forEach { buffers.release(it) }
-            }
-            tail.offer(PendingPair(lastPts, lastPts + avgSpan, first, second, frames, futures))
-            tail.drain()
-            pool.onInference = null
-        }
 
         if (decoded == 0) throw IllegalStateException("No frame could be decoded from this video")
         log(timing.summary(decoded, written))
@@ -455,10 +469,12 @@ class Interpolator(
         val wallMs = (System.nanoTime() - wallStart) / 1_000_000
         val overheadMs = wallMs - timing.totalNs() / 1_000_000
         log("Wall time: $wallMs ms (pipeline ${timing.totalNs() / 1_000_000} ms, overhead $overheadMs ms)")
-        log("Frames: $decoded decoded · $interpolatedPairs pairs interpolated (x$factor) · " +
+        val mode = if (timeline.isTarget) "target ${fmt(timeline.targetFps)} fps" else "x${timeline.factor}"
+        log("Frames: $decoded decoded · $interpolatedPairs pairs interpolated ($mode, $inferences inferences) · " +
             "$cuts scene cut(s) · $skippedDuplicates duplicate(s) skipped · $written written")
-        log("Thermal status at end: ${thermal()}")
-        log(diagnosis(decoded, timing, wallMs.toDouble(), width, height, factor))
+        log("Thermal status at end: ${thermal()} · ${SystemMonitor.sample(context).shortLine()}")
+        val perPair = if (interpolatedPairs > 0) inferences.toDouble() / interpolatedPairs else perPairInfer.toDouble()
+        log(diagnosis(decoded, timing, wallMs.toDouble(), width, height, perPair))
         return written
     }
 
@@ -466,20 +482,22 @@ class Interpolator(
     private fun encodePair(
         encoder: VideoEncoder,
         pair: PendingPair,
-        phases: DoubleArray,
         timing: StageTiming
     ): Int {
-        var produced = 0
-        val span = pair.endPts - pair.startPts
-        for (i in phases.indices) {
+        for (i in pair.items.indices) {
             checkCancelled()
-            awaitInference(pair.futures[i])
-            val pts = pair.startPts + (span * phases[i]).toLong()
-            timing.encode { encoder.encodePlanar(pair.frames[i], pts) }
-            produced++
+            val item = pair.items[i]
+            val px = when {
+                item.isFirst -> pair.first.px
+                item.isSecond -> pair.second.px
+                else -> {
+                    awaitInference(pair.futures[i]!!)
+                    pair.frames[i]!!
+                }
+            }
+            timing.encode { encoder.encode(px, item.ptsUs) }
         }
-        timing.encode { encoder.encodePlanar(pair.second, pair.endPts) }
-        return produced + 1
+        return pair.items.size
     }
 
     private fun awaitInference(future: java.util.concurrent.Future<*>) {
@@ -527,7 +545,7 @@ class Interpolator(
         wallMs: Double,
         width: Int,
         height: Int,
-        factor: Int
+        perPair: Double
     ): String {
         val total = timing.totalNs().coerceAtLeast(1)
         val infer = timing.inferNs * 100.0 / total
@@ -547,9 +565,8 @@ class Interpolator(
                     Locale.US,
                     "The RIFE model is the limit (%.0f ms/frame): the codecs and pixel conversions are not worth " +
                         "optimising further. Cost scales with the pixel count, so 480p instead of %dx%d would cut it " +
-                        "by about %d%%, and every extra multiplier step adds one more inference per pair " +
-                        "(x%d costs %d times x2).",
-                    perInfer, width, height, saving, factor, factor - 1
+                        "by about %d%%, and this job ran %.1f inference(s) per source frame (x2 = 1, x4 = 3).",
+                    perInfer, width, height, saving, perPair
                 )
             }
             decode >= 30 ->
@@ -581,15 +598,6 @@ class Interpolator(
         val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
         DeviceInfo.thermalStatus(pm)
     }.getOrDefault("unknown")
-
-    private fun adopt(
-        cur: IntArray, curPlanar: FloatArray,
-        prev: IntArray, prevPlanar: FloatArray,
-        pixels: Int
-    ) {
-        System.arraycopy(cur, 0, prev, 0, pixels)
-        System.arraycopy(curPlanar, 0, prevPlanar, 0, pixels * 3)
-    }
 
     private fun copyAudio(inputUri: Uri, encoder: VideoEncoder, log: (String) -> Unit) {
         var copied = 0L

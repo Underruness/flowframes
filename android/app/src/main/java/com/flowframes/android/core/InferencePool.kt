@@ -151,14 +151,38 @@ class InferencePool(
         }
     }
 
+    /** ARGB version of [submit], the one the job uses (8-bit frames, a quarter of the memory). */
+    fun submitArgb(
+        frame0: IntArray,
+        frame1: IntArray,
+        width: Int,
+        height: Int,
+        t: Float,
+        out: IntArray
+    ): Future<*> {
+        return executor.submit {
+            val engine = threadEngine.get() ?: engines[0]
+            val start = System.nanoTime()
+            try {
+                engine.interpolateArgb(frame0, frame1, width, height, t, out)
+                val c = counters.getOrPut(engine) { EngineCounter() }
+                c.count.incrementAndGet()
+                c.nanos.addAndGet(System.nanoTime() - start)
+            } finally {
+                onInference?.invoke(System.nanoTime() - start)
+            }
+        }
+    }
+
     /** Runs every session once so the first real frame does not pay for lazy setup. */
     fun warmUp(width: Int, height: Int) {
         val futures = ArrayList<Future<*>>(workers)
+        // Shared inputs: a 4K warm-up must not allocate one set of frames per worker.
+        val a = IntArray(width * height) { 0xFF808080.toInt() }
+        val b = IntArray(width * height) { 0xFF808080.toInt() }
         for (index in 0 until workers) {
-            val a = FloatArray(width * height * 3) { 0.5f }
-            val b = FloatArray(width * height * 3) { 0.5f }
-            val o = FloatArray(width * height * 3)
-            futures += executor.submit { (threadEngine.get() ?: engines[0]).interpolate(a, b, width, height, 0.5f, o) }
+            val o = IntArray(width * height)
+            futures += executor.submit { (threadEngine.get() ?: engines[0]).interpolateArgb(a, b, width, height, 0.5f, o) }
         }
         futures.forEach { runCatching { it.get() } }
     }
@@ -249,5 +273,19 @@ class FloatArrayPool(private val size: Int) {
     @Synchronized
     fun release(array: FloatArray) {
         if (array.size == size && free.size < 12) free.addLast(array)
+    }
+}
+
+/** [FloatArrayPool] for ARGB frames. */
+class IntArrayPool(private val size: Int, private val maxFree: Int = 12) {
+
+    private val free = ArrayDeque<IntArray>()
+
+    @Synchronized
+    fun acquire(): IntArray = free.removeLastOrNull() ?: IntArray(size)
+
+    @Synchronized
+    fun release(array: IntArray) {
+        if (array.size == size && free.size < maxFree) free.addLast(array)
     }
 }

@@ -302,6 +302,8 @@ object EngineBenchmark {
         )
         DeviceInfo.lines(context).forEach { sb.appendLine(it) }
         sb.appendLine("Vulkan GPUs: $gpus" + if (gpus > 0) " (${NcnnRifeEngine.gpuInfo(0)})" else "")
+        if (gpus > 0) NcnnRifeEngine.shaderCacheStats().takeIf { it.isNotBlank() }?.let { sb.appendLine("GPU cache: $it") }
+        sb.appendLine(SystemMonitor.sample(context).shortLine())
         sb.appendLine("--- results (ms per interpolated frame, lower is better) ---")
         results.sortedBy { it.msPerFrame }.forEach { r ->
             if (r.error == null) {

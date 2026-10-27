@@ -6,6 +6,7 @@
 #define FLOWFRAMES_RIFE_CORE_H
 
 #include <atomic>
+#include <cstdint>
 #include <string>
 
 #include "net.h"
@@ -34,6 +35,9 @@ public:
     // Thread-safe: several threads may interpolate concurrently (one extractor per call).
     int interpolate(const float* frame0, const float* frame1, int width, int height, float timestep,
                     float* out) const;
+    // Same, on Android ARGB pixels (0xAARRGGBB, alpha ignored, output alpha 0xFF).
+    int interpolateArgb(const uint32_t* frame0, const uint32_t* frame1, int width, int height,
+                        float timestep, uint32_t* out) const;
 
     bool usesGpu() const { return vkdev != nullptr; }
     std::string deviceName() const;
@@ -46,6 +50,9 @@ public:
 
 private:
     void fillPadded(const float* planar, int width, int height, ncnn::Mat& dst) const;
+    void fillPaddedArgb(const uint32_t* argb, int width, int height, ncnn::Mat& dst) const;
+    int run(const ncnn::Mat& in0, const ncnn::Mat& in1, int width, int height, float timestep,
+            ncnn::Mat& result) const;
 
     RifeConfig cfg;
     ncnn::VulkanDevice* vkdev = nullptr;

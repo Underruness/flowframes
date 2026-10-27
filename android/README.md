@@ -477,6 +477,30 @@ Mesures de la 1.5.1 sur Adreno 840, canevas de 1920x1088, en ms par inférence :
 - **Réponses tardives :** une réponse arrivée après la limite est signalée comme lente, et le GPU est de nouveau utilisable.
 - **Limite de temps pour fp16 + coopmat :** 240 s, au benchmark comme à l'auto-test d'une tâche.
 
+### Version 1.6.0 — cache GPU, 1440p/4K, fps exact, moniteur
+
+- **Cache des shaders GPU persistant.** Les shaders SPIR-V compilés par ncnn et le cache de
+  pipelines du pilote Vulkan sont enregistrés dans `files/gpu-shader-cache`. Le premier lancement
+  en fp16 + coopmat (98 s de construction des pipelines sur l'Adreno 840) n'est payé qu'une fois ;
+  les lancements suivants relisent le cache. Le log et le benchmark affichent
+  `GPU cache: shaders: … compiled, … from the disk cache · GPU pipelines: …`. Un bouton
+  « Clear GPU shader cache » le vide (utile après une mise à jour du pilote).
+- **1440p et 4K.** Le « out of memory » au-dessus de 1080p venait du pipeline Java : chaque image
+  y était stockée en float (12 octets/pixel, ~100 Mo par image 4K) et copiée plusieurs fois. Les
+  images restent maintenant en ARGB 8 bits (4 octets/pixel), sont partagées sans copie entre les
+  deux paires qui les utilisent, et la conversion float ↔ 8 bits ainsi que la conversion
+  RGB → YUV de l'encodeur sont faites en C++. Au-dessus de 1440p une seule session GPU est
+  utilisée (une seule sature déjà le GPU). Nouveau choix « 4K » dans la résolution.
+- **FPS exact.** En plus du multiplicateur, on peut demander une cadence de sortie précise
+  (30, 48, 60, 90, 120, 144, 165, 240 ou une valeur libre comme 59.94). Les images de sortie sont
+  placées sur une grille régulière et RIFE est appelé avec le pas fractionnaire correspondant
+  (24 → 60 fps = x2,5) ; les images qui tombent sur une image source la réutilisent sans calcul.
+- **Moniteur et minuteur.** L'écran principal affiche la RAM (application, part GPU, téléphone) et
+  les températures CPU / GPU / NPU / batterie lues dans `/sys/class/thermal` (selon ce que le
+  constructeur autorise), ainsi que le temps écoulé, le temps restant estimé, l'heure de fin et,
+  à la fin, le temps total du travail. Remarque : RIFE tourne sur le GPU, pas sur le NPU ; la
+  température NPU est indicative.
+
 ## Limites connues
 
 * Sortie **MP4 uniquement** (H.264 ou HEVC), pas de GIF/PNG/MKV.

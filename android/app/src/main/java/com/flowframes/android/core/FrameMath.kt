@@ -9,8 +9,8 @@ package com.flowframes.android.core
 object FrameMath {
 
     /** Packs an ARGB frame into 3 planar RGB channels in [0,1] (CHW order, no alpha). */
-    fun argbToPlanar(src: IntArray, dst: FloatArray) {
-        val n = src.size
+    fun argbToPlanar(src: IntArray, dst: FloatArray, pixels: Int = src.size) {
+        val n = pixels
         require(dst.size >= n * 3) { "planar buffer too small: ${dst.size} < ${n * 3}" }
         var r = 0
         var g = n
@@ -25,8 +25,8 @@ object FrameMath {
     }
 
     /** Inverse of [argbToPlanar]; values outside [0,1] are clamped. */
-    fun planarToArgb(src: FloatArray, dst: IntArray) {
-        val n = dst.size
+    fun planarToArgb(src: FloatArray, dst: IntArray, pixels: Int = dst.size) {
+        val n = pixels
         require(src.size >= n * 3) { "planar buffer too small" }
         var r = 0
         var g = n

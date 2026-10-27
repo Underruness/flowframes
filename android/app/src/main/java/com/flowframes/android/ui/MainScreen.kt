@@ -60,6 +60,9 @@ import com.flowframes.android.job.JobItem
 import com.flowframes.android.job.JobStatus
 import com.flowframes.android.job.Settings
 import java.util.Locale
+import com.flowframes.android.job.SystemMonitor
+import com.flowframes.android.job.formatClock
+import com.flowframes.android.job.estimateRemainingMs
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -141,6 +144,7 @@ fun MainScreen(
             .padding(padding)
             .fillMaxSize()) {
             SettingsSummary(settings)
+            SystemPanel(running)
             if (jobs.isEmpty()) {
                 EmptyState(onAdd = onAdd)
             } else {
@@ -169,6 +173,7 @@ private fun SettingsSummary(settings: Settings) {
         1280 -> "720p"
         1920 -> "1080p"
         2560 -> "1440p"
+        3840 -> "4K"
         else -> "${settings.maxLongSide} px"
     }
     Surface(
@@ -182,7 +187,8 @@ private fun SettingsSummary(settings: Settings) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                "x${settings.factor}",
+                if (settings.targetFps > 0.0) String.format(Locale.US, "%.3f", settings.targetFps).trimEnd('0').trimEnd('.') + " fps"
+                else "x${settings.factor}",
                 color = Accent,
                 fontWeight = FontWeight.Bold
             )
@@ -295,6 +301,7 @@ private fun JobCard(job: JobItem, onRemove: () -> Unit, canRemove: Boolean) {
                     trackColor = MaterialTheme.colorScheme.surfaceVariant
                 )
             }
+            JobTimer(job)
             if (job.detail.isNotEmpty()) {
                 Spacer(Modifier.height(6.dp))
                 Text(job.detail, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -382,4 +389,86 @@ private fun formatDuration(seconds: Double): String {
     val m = total / 60
     val s = total % 60
     return if (m > 0) "${m}m ${s}s" else "${s}s"
+}
+
+/** Elapsed time and ETA while running, total time once finished. */
+@Composable
+private fun JobTimer(job: JobItem) {
+    if (job.startedAtMs <= 0L) return
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    var etaFrom by remember(job.id, job.startedAtMs) { mutableStateOf<Pair<Long, Float>?>(null) }
+    if (job.status == JobStatus.RUNNING) {
+        LaunchedEffect(job.id, job.startedAtMs) {
+            while (true) {
+                now = System.currentTimeMillis()
+                kotlinx.coroutines.delay(1000)
+            }
+        }
+        if (etaFrom == null && job.progress > 0f) etaFrom = System.currentTimeMillis() to job.progress
+    }
+    val text = when {
+        job.status == JobStatus.RUNNING -> {
+            val eta = etaFrom?.let { estimateRemainingMs(now, it.first, it.second, job.progress) }
+            "Elapsed " + formatClock(now - job.startedAtMs) +
+                (if (eta != null) " · ETA " + formatClock(eta) + " · ends ~" +
+                    java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(java.util.Date(now + eta))
+                else " · ETA computing…")
+        }
+        job.finishedAtMs > 0L -> "Total time " + formatClock(job.finishedAtMs - job.startedAtMs)
+        else -> return
+    }
+    Spacer(Modifier.height(6.dp))
+    Text(text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Accent)
+}
+
+/** RAM and temperatures, refreshed every 2 s (every 5 s when idle). */
+@Composable
+private fun SystemPanel(running: Boolean) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var snap by remember { mutableStateOf<SystemMonitor.Snapshot?>(null) }
+    LaunchedEffect(running) {
+        while (true) {
+            snap = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching { SystemMonitor.sample(context) }.getOrNull()
+            }
+            kotlinx.coroutines.delay(if (running) 2000 else 5000)
+        }
+    }
+    val s = snap ?: return
+    fun t(v: Double?) = if (v == null) "n/a" else String.format(Locale.US, "%.0f°", v)
+    fun tempColor(v: Double?) = when {
+        v == null -> null
+        v >= 75 -> Danger
+        v >= 60 -> Warn
+        else -> null
+    }
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("RAM", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Accent)
+            Text(
+                "app ${s.appPssMb} MB (gpu ${s.graphicsMb}) · phone " +
+                    String.format(Locale.US, "%.1f/%.1f GB", (s.sysTotalMb - s.sysAvailMb) / 1024.0, s.sysTotalMb / 1024.0) +
+                    if (s.lowMemory) " · LOW" else "",
+                fontSize = 11.sp,
+                color = if (s.lowMemory) Danger else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("TEMP", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Accent)
+            listOf("CPU" to s.cpuC, "GPU" to s.gpuC, "NPU" to s.npuC, "Batt" to s.batteryC).forEach { (label, v) ->
+                Text(
+                    "$label ${t(v)}",
+                    fontSize = 11.sp,
+                    color = tempColor(v) ?: MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            s.headroom?.let {
+                Text(
+                    String.format(Locale.US, "headroom %.0f%%", it * 100),
+                    fontSize = 11.sp,
+                    color = if (it >= 0.9f) Warn else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
 }

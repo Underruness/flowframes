@@ -55,6 +55,14 @@ class NcnnRifeEngine(
         if (ret != 0) throw IllegalStateException("ncnn inference failed (code $ret) on $deviceName")
     }
 
+    /** 8-bit path: the frames stay ARGB ints on the Java side, the float conversion is native. */
+    override fun interpolateArgb(frame0: IntArray, frame1: IntArray, width: Int, height: Int, t: Float, out: IntArray) {
+        val h = handle
+        check(h != 0L) { "engine closed" }
+        val ret = nativeInterpolateArgb(h, frame0, frame1, width, height, t, out)
+        if (ret != 0) throw IllegalStateException("ncnn inference failed (code $ret) on $deviceName")
+    }
+
     override fun close() {
         val h = handle
         handle = 0L
@@ -78,6 +86,23 @@ class NcnnRifeEngine(
 
         fun gpuName(index: Int): String = if (isAvailable) runCatching { nativeGpuName(index) }.getOrDefault("") else ""
 
+        /**
+         * Directory of the persistent GPU shader caches (SPIR-V + driver pipelines). Without it,
+         * every start compiles everything again: 98 s with fp16 + coopmat on an Adreno 840.
+         */
+        fun setShaderCacheDir(dir: File) {
+            if (!isAvailable) return
+            dir.mkdirs()
+            runCatching { nativeSetShaderCacheDir(dir.absolutePath) }
+        }
+
+        /** Compile counts, time spent and cache hits since the process started. */
+        fun shaderCacheStats(): String = if (isAvailable) runCatching { nativeShaderCacheStats() }.getOrDefault("") else ""
+
+        fun clearShaderCaches() {
+            if (isAvailable) runCatching { nativeClearShaderCaches() }
+        }
+
         @JvmStatic private external fun nativeGpuCount(): Int
         @JvmStatic private external fun nativeGpuName(index: Int): String
         @JvmStatic private external fun nativeGpuInfo(index: Int): String
@@ -89,6 +114,12 @@ class NcnnRifeEngine(
         @JvmStatic private external fun nativeInterpolate(
             handle: Long, frame0: FloatArray, frame1: FloatArray, width: Int, height: Int, t: Float, out: FloatArray
         ): Int
+        @JvmStatic private external fun nativeInterpolateArgb(
+            handle: Long, frame0: IntArray, frame1: IntArray, width: Int, height: Int, t: Float, out: IntArray
+        ): Int
+        @JvmStatic private external fun nativeSetShaderCacheDir(dir: String)
+        @JvmStatic private external fun nativeShaderCacheStats(): String
+        @JvmStatic private external fun nativeClearShaderCaches()
         @JvmStatic private external fun nativeDestroy(handle: Long)
     }
 }

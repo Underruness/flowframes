@@ -29,9 +29,17 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import android.widget.Toast
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -78,17 +86,76 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Section("Interpolation") {
-                Text("Multiplier", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Text("Output rate", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                val targetMode = settings.targetFps > 0.0
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(2, 3, 4, 6, 8).forEach { f ->
-                        FilterChip(
-                            selected = settings.factor == f,
-                            onClick = { onChange { s -> s.copy(factor = f) } },
-                            label = { Text("x$f") }
-                        )
-                    }
+                    FilterChip(
+                        selected = !targetMode,
+                        onClick = { onChange { s -> s.copy(targetFps = 0.0) } },
+                        label = { Text("Multiplier") }
+                    )
+                    FilterChip(
+                        selected = targetMode,
+                        onClick = { onChange { s -> s.copy(targetFps = if (s.targetFps > 0.0) s.targetFps else 60.0) } },
+                        label = { Text("Exact fps") }
+                    )
                 }
-                Caption("Each step adds ${settings.factor - 1} interpolated frame(s) between two source frames.")
+                if (!targetMode) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(2, 3, 4, 6, 8).forEach { f ->
+                            FilterChip(
+                                selected = settings.factor == f,
+                                onClick = { onChange { s -> s.copy(factor = f) } },
+                                label = { Text("x$f") }
+                            )
+                        }
+                    }
+                    Caption("Each step adds ${settings.factor - 1} interpolated frame(s) between two source frames.")
+                } else {
+                    var fpsText by remember(targetMode) { mutableStateOf(fpsLabel(settings.targetFps)) }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(30.0, 48.0, 60.0, 90.0).forEach { f ->
+                            FilterChip(
+                                selected = settings.targetFps == f,
+                                onClick = {
+                                    fpsText = fpsLabel(f)
+                                    onChange { s -> s.copy(targetFps = f) }
+                                },
+                                label = { Text(String.format(Locale.US, "%.0f", f)) }
+                            )
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(120.0, 144.0, 165.0, 240.0).forEach { f ->
+                            FilterChip(
+                                selected = settings.targetFps == f,
+                                onClick = {
+                                    fpsText = fpsLabel(f)
+                                    onChange { s -> s.copy(targetFps = f) }
+                                },
+                                label = { Text(String.format(Locale.US, "%.0f", f)) }
+                            )
+                        }
+                    }
+                    OutlinedTextField(
+                        value = fpsText,
+                        onValueChange = { v ->
+                            fpsText = v
+                            v.replace(',', '.').toDoubleOrNull()?.takeIf { it in 1.0..480.0 }?.let { fps ->
+                                onChange { s -> s.copy(targetFps = fps) }
+                            }
+                        },
+                        label = { Text("Output fps (1–480, e.g. 59.94)") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Caption(
+                        "The output gets exactly this frame rate whatever the source is: 24 → 60 fps interpolates " +
+                            "frames at fractional positions (x2.5). Frames that fall on a source frame reuse it, " +
+                            "so they cost nothing. The output fps limit below does not apply in this mode."
+                    )
+                }
 
                 Spacer(Modifier.height(4.dp))
                 Text("Processing resolution", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
@@ -102,7 +169,7 @@ fun SettingsScreen(
                     }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(2560 to "1440p", 0 to "Source").forEach { (v, label) ->
+                    listOf(2560 to "1440p", 3840 to "4K", 0 to "Source").forEach { (v, label) ->
                         FilterChip(
                             selected = settings.maxLongSide == v,
                             onClick = { onChange { s -> s.copy(maxLongSide = v) } },
@@ -111,7 +178,7 @@ fun SettingsScreen(
                     }
                 }
                 Caption(
-                    "Higher resolutions look better but cost time and RAM roughly with the pixel count. " +
+                    "Higher resolutions look better but cost time and RAM roughly with the pixel count (1440p = 1.8×, 4K = 4× the 1080p time). " +
                         "Each frame costs about (width × height) / 330 000 × the per-frame time shown by the benchmark."
                 )
             }
@@ -416,6 +483,16 @@ fun SettingsScreen(
                     OutlinedButton(onClick = onCopyLogs) { Text("Copy logs", fontSize = 12.sp) }
                     OutlinedButton(onClick = onShareLogs) { Text("Share logs", fontSize = 12.sp) }
                 }
+                val ctx = LocalContext.current
+                OutlinedButton(onClick = {
+                    Thread { com.flowframes.android.core.NcnnRifeEngine.clearShaderCaches() }.start()
+                    Toast.makeText(ctx, "GPU shader cache cleared: the next GPU run rebuilds it", Toast.LENGTH_SHORT).show()
+                }) { Text("Clear GPU shader cache", fontSize = 12.sp) }
+                Caption(
+                    "Compiled GPU shaders are kept on disk, so the slow first build (up to 1.5 min with fp16 + " +
+                        "coopmat) only happens once per app version or driver update. Clear it only if a GPU " +
+                        "configuration misbehaves after a driver update."
+                )
                 Caption(
                     "Logs include device model, core count, thermal status, engine configuration, per-stage " +
                         "timings, inference latency percentiles with their drift, per-minute progress and a " +
@@ -425,8 +502,8 @@ fun SettingsScreen(
 
             Section("About") {
                 Text(
-                    "FlowFrames Android 1.4.0 — a rewrite of the FlowFrames (Windows) pipeline for Android: " +
-                        "MediaCodec decoding, RIFE 4.9 interpolation through ONNX Runtime, hardware encoding " +
+                    "FlowFrames Android 1.6.0 — a rewrite of the FlowFrames (Windows) pipeline for Android: " +
+                        "MediaCodec decoding, RIFE interpolation on the GPU (ncnn Vulkan) or the CPU, hardware encoding " +
                         "and MP4 muxing.",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -476,3 +553,7 @@ private fun SwitchRow(
         Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
+
+private fun fpsLabel(fps: Double): String =
+    if (fps % 1.0 == 0.0) String.format(Locale.US, "%.0f", fps)
+    else String.format(Locale.US, "%.3f", fps).trimEnd('0').trimEnd('.')

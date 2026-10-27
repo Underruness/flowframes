@@ -151,4 +151,65 @@ class NcnnRifeEngineTest {
         assertTrue("$error", error is java.util.concurrent.TimeoutException)
         assertTrue((System.nanoTime() - start) < 10_000_000_000L)
     }
+
+    @Test
+    fun `8-bit ARGB path matches the float path`() {
+        assumeTrue(NcnnRifeEngine.isAvailable)
+        val f0 = resource("frame0.f32")
+        val f1 = resource("frame1.f32")
+        val a0 = IntArray(w * h).also { FrameMath.planarToArgb(f0, it) }
+        val a1 = IntArray(w * h).also { FrameMath.planarToArgb(f1, it) }
+        // Float reference from the same 8-bit inputs, so only the output rounding differs.
+        val q0 = FloatArray(w * h * 3).also { FrameMath.argbToPlanar(a0, it) }
+        val q1 = FloatArray(w * h * 3).also { FrameMath.argbToPlanar(a1, it) }
+        NcnnRifeEngine(modelDir.absolutePath, gpuId = -1, cpuThreads = 2).use { engine ->
+            val ref = FloatArray(w * h * 3)
+            engine.interpolate(q0, q1, w, h, 0.5f, ref)
+            val expected = IntArray(w * h).also { FrameMath.planarToArgb(ref, it) }
+            val got = IntArray(w * h)
+            engine.interpolateArgb(a0, a1, w, h, 0.5f, got)
+            var maxDiff = 0
+            for (i in got.indices) for (sh in intArrayOf(0, 8, 16)) {
+                maxDiff = maxOf(maxDiff, kotlin.math.abs(((got[i] ushr sh) and 0xFF) - ((expected[i] ushr sh) and 0xFF)))
+            }
+            assertTrue("max channel difference $maxDiff", maxDiff <= 1)
+            assertTrue(got.all { (it ushr 24) == 0xFF })
+        }
+    }
+
+    @Test
+    fun `native ARGB to YUV matches the Kotlin converter`() {
+        assumeTrue(NcnnRifeEngine.isAvailable)
+        val ww = 37
+        val hh = 21
+        val rnd = java.util.Random(7)
+        val argb = IntArray(ww * hh) { 0xFF000000.toInt() or (rnd.nextInt() and 0xFFFFFF) }
+        for (spec in listOf(YuvConverter.BT601_LIMITED, YuvConverter.BT709_LIMITED, YuvConverter.BT709_FULL)) {
+            val yStride = 40
+            val uvStride = 20
+            fun bufs() = Triple(
+                ByteBuffer.allocateDirect(yStride * hh),
+                ByteBuffer.allocateDirect(uvStride * ((hh + 1) / 2)),
+                ByteBuffer.allocateDirect(uvStride * ((hh + 1) / 2))
+            )
+            val (ky, ku, kv) = bufs()
+            YuvConverter.argbToYuv420(argb, ww, hh, ky, ku, kv, yStride, uvStride, 1, spec)
+            val (ny, nu, nv) = bufs()
+            assertTrue(NativeFrames.argbToYuv420(argb, ww, hh, ny, nu, nv, yStride, uvStride, 1, spec))
+            for ((k, n) in listOf(ky to ny, ku to nu, kv to nv)) {
+                for (i in 0 until k.capacity()) {
+                    assertTrue("${spec.label} byte $i: ${k.get(i)} vs ${n.get(i)}", kotlin.math.abs(k.get(i) - n.get(i)) <= 1)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `GPU shader cache is written to disk`() {
+        assumeTrue(NcnnRifeEngine.isAvailable && NcnnRifeEngine.gpuCount() > 0)
+        val dir = java.nio.file.Files.createTempDirectory("ffcache").toFile()
+        NcnnRifeEngine.setShaderCacheDir(dir)
+        NcnnRifeEngine(modelDir.absolutePath, gpuId = 0).use { engine -> run(engine, 0.5f) }
+        assertTrue(NcnnRifeEngine.shaderCacheStats(), File(dir, "spirv.cache").length() > 0)
+    }
 }

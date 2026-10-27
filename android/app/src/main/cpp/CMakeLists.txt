@@ -30,10 +30,13 @@ find_package(ncnn REQUIRED)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/shaders.cmake)
 
-add_library(flowframes_rife SHARED rife_jni.cpp rife_core.cpp warp.cpp ${RIFE_SHADER_HEADERS})
+add_library(flowframes_rife SHARED rife_jni.cpp rife_core.cpp warp.cpp shader_cache.cpp ${RIFE_SHADER_HEADERS})
 target_include_directories(flowframes_rife PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
 target_compile_options(flowframes_rife PRIVATE -O3 -fvisibility=hidden -ffunction-sections -fdata-sections)
 target_link_options(flowframes_rife PRIVATE -Wl,--gc-sections -Wl,--exclude-libs,ALL
     # Android 15+ devices may use 16 KB pages.
-    -Wl,-z,max-page-size=16384)
+    -Wl,-z,max-page-size=16384
+    # Persistent SPIR-V cache: ncnn's call to compile_spirv_module(int, Option, spirv) goes
+    # through shader_cache.cpp (libc++ mangling, see FF_COMPILE_SYM there).
+    -Wl,--wrap=_ZN4ncnn20compile_spirv_moduleEiRKNS_6OptionERNSt6__ndk16vectorIjNS3_9allocatorIjEEEE)
 target_link_libraries(flowframes_rife ncnn android log)

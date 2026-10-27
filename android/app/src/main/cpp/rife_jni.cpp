@@ -10,6 +10,7 @@
 
 #include "gpu.h"
 #include "rife_core.h"
+#include "shader_cache.h"
 
 #define LOG_TAG "FlowFramesRife"
 #ifdef __ANDROID__
@@ -110,7 +111,115 @@ Java_com_flowframes_android_core_NcnnRifeEngine_nativeInterpolate(JNIEnv* env, j
     env->GetFloatArrayRegion(frame1, 0, n, b.data());
     int ret = core->interpolate(a.data(), b.data(), width, height, t, o.data());
     if (ret == 0) env->SetFloatArrayRegion(out, 0, n, o.data());
+    flowframes::flushShaderCaches();
     return ret;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_flowframes_android_core_NcnnRifeEngine_nativeInterpolateArgb(JNIEnv* env, jclass, jlong handle,
+                                                                       jintArray frame0, jintArray frame1,
+                                                                       jint width, jint height, jfloat t,
+                                                                       jintArray out) {
+    auto* core = reinterpret_cast<RifeCore*>(handle);
+    if (!core) return -1;
+    const jsize n = (jsize)width * height;
+    if (env->GetArrayLength(frame0) < n || env->GetArrayLength(frame1) < n || env->GetArrayLength(out) < n) {
+        return -10;
+    }
+    // 4 bytes per pixel: a 4K frame is 33 MB here instead of 100 MB of floats.
+    thread_local std::vector<uint32_t> a, b, o;
+    a.resize(n);
+    b.resize(n);
+    o.resize(n);
+    env->GetIntArrayRegion(frame0, 0, n, reinterpret_cast<jint*>(a.data()));
+    env->GetIntArrayRegion(frame1, 0, n, reinterpret_cast<jint*>(b.data()));
+    int ret = core->interpolateArgb(a.data(), b.data(), width, height, t, o.data());
+    if (ret == 0) env->SetIntArrayRegion(out, 0, n, reinterpret_cast<const jint*>(o.data()));
+    flowframes::flushShaderCaches();
+    return ret;
+}
+
+JNIEXPORT void JNICALL
+Java_com_flowframes_android_core_NcnnRifeEngine_nativeSetShaderCacheDir(JNIEnv* env, jclass, jstring dir) {
+    flowframes::setShaderCacheDir(jstr(env, dir));
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_flowframes_android_core_NcnnRifeEngine_nativeShaderCacheStats(JNIEnv* env, jclass) {
+    return env->NewStringUTF(flowframes::shaderCacheStats().c_str());
+}
+
+JNIEXPORT void JNICALL
+Java_com_flowframes_android_core_NcnnRifeEngine_nativeClearShaderCaches(JNIEnv*, jclass) {
+    flowframes::clearShaderCaches();
+}
+
+// ARGB -> YUV 4:2:0 straight into the encoder's input planes (direct ByteBuffers), with the same
+// Q8 integer maths as YuvConverter.argbToYuv420. coeffs = eY[3], eU[3], eV[3], yOff, uvOff.
+JNIEXPORT jint JNICALL
+Java_com_flowframes_android_core_NativeFrames_nativeArgbToYuv420(JNIEnv* env, jclass, jintArray argbArr,
+                                                                  jint width, jint height, jobject yBuf,
+                                                                  jobject uBuf, jobject vBuf, jint yRowStride,
+                                                                  jint uvRowStride, jint uvPixelStride,
+                                                                  jintArray coeffArr) {
+    if (env->GetArrayLength(argbArr) < width * height || env->GetArrayLength(coeffArr) < 11) return -10;
+    auto* y = static_cast<uint8_t*>(env->GetDirectBufferAddress(yBuf));
+    auto* u = static_cast<uint8_t*>(env->GetDirectBufferAddress(uBuf));
+    auto* v = static_cast<uint8_t*>(env->GetDirectBufferAddress(vBuf));
+    if (!y || !u || !v) return -11;
+    const jlong yCap = env->GetDirectBufferCapacity(yBuf);
+    const jlong uCap = env->GetDirectBufferCapacity(uBuf);
+    const jlong vCap = env->GetDirectBufferCapacity(vBuf);
+    const int cw = (width + 1) / 2, ch = (height + 1) / 2;
+    if ((jlong)(height - 1) * yRowStride + width > yCap) return -12;
+    const jlong uvNeed = (jlong)(ch - 1) * uvRowStride + (jlong)(cw - 1) * uvPixelStride + 1;
+    if (uvNeed > uCap || uvNeed > vCap) return -12;
+    jint k[11];
+    env->GetIntArrayRegion(coeffArr, 0, 11, k);
+    // Critical access is fine here: this loop takes a few milliseconds and does not call back.
+    auto* argb = static_cast<const uint32_t*>(env->GetPrimitiveArrayCritical(argbArr, nullptr));
+    if (!argb) return -13;
+    auto clamp = [](int x) -> uint8_t { return (uint8_t)(x < 0 ? 0 : (x > 255 ? 255 : x)); };
+    for (int row = 0; row < height; row++) {
+        const uint32_t* src = argb + (size_t)row * width;
+        uint8_t* dst = y + (size_t)row * yRowStride;
+        for (int col = 0; col < width; col++) {
+            const uint32_t c = src[col];
+            const int r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
+            dst[col] = clamp(((k[0] * r + k[1] * g + k[2] * b + 128) >> 8) + k[9]);
+        }
+    }
+    for (int cr = 0; cr < ch; cr++) {
+        const int row = cr * 2;
+        const bool two = row + 1 < height;
+        const uint32_t* s0 = argb + (size_t)row * width;
+        const uint32_t* s1 = two ? s0 + width : s0;
+        uint8_t* ud = u + (size_t)cr * uvRowStride;
+        uint8_t* vd = v + (size_t)cr * uvRowStride;
+        for (int cc = 0; cc < cw; cc++) {
+            const int col = cc * 2;
+            const bool right = col + 1 < width;
+            int rs = 0, gs = 0, bs = 0, n = 0;
+            auto add = [&](uint32_t c) {
+                rs += (c >> 16) & 0xFF;
+                gs += (c >> 8) & 0xFF;
+                bs += c & 0xFF;
+                n++;
+            };
+            add(s0[col]);
+            if (right) add(s0[col + 1]);
+            if (two) {
+                add(s1[col]);
+                if (right) add(s1[col + 1]);
+            }
+            const int r = rs / n, g = gs / n, b = bs / n;
+            const size_t idx = (size_t)cc * uvPixelStride;
+            ud[idx] = clamp(((k[3] * r + k[4] * g + k[5] * b + 128) >> 8) + k[10]);
+            vd[idx] = clamp(((k[6] * r + k[7] * g + k[8] * b + 128) >> 8) + k[10]);
+        }
+    }
+    env->ReleasePrimitiveArrayCritical(argbArr, const_cast<uint32_t*>(argb), JNI_ABORT);
+    return 0;
 }
 
 JNIEXPORT void JNICALL

@@ -16,8 +16,32 @@ data class JobItem(
     val detail: String = "",
     val error: String? = null,
     val outputName: String? = null,
-    val outputLabel: String? = null
+    val outputLabel: String? = null,
+    /** Wall-clock start and end of the job (System.currentTimeMillis), 0 when not reached yet. */
+    val startedAtMs: Long = 0L,
+    val finishedAtMs: Long = 0L
 )
+
+/** "1:05" / "1:02:03". */
+fun formatClock(ms: Long): String {
+    val total = (ms / 1000).coerceAtLeast(0)
+    val h = total / 3600
+    val m = (total % 3600) / 60
+    val sec = total % 60
+    return if (h > 0) String.format(java.util.Locale.US, "%d:%02d:%02d", h, m, sec)
+    else String.format(java.util.Locale.US, "%d:%02d", m, sec)
+}
+
+/**
+ * Remaining time from the progress rate since [fromMs]/[fromProgress] (the first progress report,
+ * so the engine start-up and the shader build do not skew it). Null until it is meaningful.
+ */
+fun estimateRemainingMs(nowMs: Long, fromMs: Long, fromProgress: Float, progress: Float): Long? {
+    val done = progress - fromProgress
+    val elapsed = nowMs - fromMs
+    if (done < 0.01f || elapsed < 3000) return null
+    return (elapsed * ((1f - progress) / done)).toLong().coerceAtLeast(0)
+}
 
 /**
  * In-process state shared by the UI and the foreground service (single process, no binder needed).

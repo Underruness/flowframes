@@ -93,7 +93,15 @@ object EngineFactory {
         }
         val failures = ArrayList<String>()
         for (kind in chain(settings)) {
-            val choice = plan(kind, settings)
+            var choice = plan(kind, settings)
+            // Above 1440p each GPU session holds several hundred MB of Vulkan buffers and one
+            // session already saturates the GPU, so a second one only costs memory.
+            if (kind == EngineKind.NCNN_GPU && settings.workers <= 0 && width.toLong() * height > 2560L * 1440L &&
+                choice.workers > 1
+            ) {
+                choice = choice.copy(workers = 1)
+                log("Resolution above 1440p: 1 GPU session to save memory")
+            }
             val pool = runCatching { create(context, settings, choice, width, height, log) }
                 .getOrElse { t ->
                     val reason = t.message ?: t.javaClass.simpleName

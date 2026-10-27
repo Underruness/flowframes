@@ -29,6 +29,8 @@ enum class OutputCodec(val mime: String, val label: String) {
 data class Settings(
     /** Frame multiplier: 2x, 3x, 4x, 8x ... */
     val factor: Int = 2,
+    /** Exact output frame rate; 0 = use [factor]. Any rate works (24 → 60 fps is x2.5). */
+    val targetFps: Double = 0.0,
     /** FAST = RIFE without ensemble (about twice as fast), HIGH = ensemble for better quality. */
     val quality: AiQuality = AiQuality.FAST,
     /** Long side cap for interpolation/encoding; 0 keeps the source resolution. */
@@ -115,6 +117,7 @@ class SettingsStore(context: Context) {
         val d = Settings()
         return Settings(
             factor = prefs.getInt("factor", d.factor).coerceIn(1, 32),
+            targetFps = prefs.getFloat("targetFps", d.targetFps.toFloat()).toDouble().coerceIn(0.0, 480.0),
             quality = runCatching { AiQuality.valueOf(prefs.getString("quality", d.quality.name)!!) }
                 .getOrDefault(d.quality),
             maxLongSide = prefs.getInt("maxLongSide", d.maxLongSide),
@@ -151,6 +154,7 @@ class SettingsStore(context: Context) {
     private fun save(s: Settings) {
         prefs.edit()
             .putInt("factor", s.factor)
+            .putFloat("targetFps", s.targetFps.toFloat())
             .putString("quality", s.quality.name)
             .putInt("maxLongSide", s.maxLongSide)
             .putBoolean("keepAudio", s.keepAudio)
