@@ -493,8 +493,9 @@ fun SettingsScreen(
                     Toast.makeText(ctx, "GPU shader cache cleared: the next GPU run rebuilds it", Toast.LENGTH_SHORT).show()
                 }) { Text("Clear GPU shader cache", fontSize = 12.sp) }
                 Caption(
-                    "Compiled GPU shaders are kept on disk, so the slow first build (up to 1.5 min with fp16 + " +
-                        "coopmat) only happens once per app version or driver update. Clear it only if a GPU " +
+                    "The GPU engine is built when the app starts, in the background, and the compiled shaders are " +
+                        "kept on disk: the first launch pays for the compilation (up to 1.5 min with fp16 + coopmat) " +
+                        "and every interpolation afterwards starts immediately. Clear the cache only if a GPU " +
                         "configuration misbehaves after a driver update."
                 )
                 Caption(
@@ -506,7 +507,7 @@ fun SettingsScreen(
 
             Section("About") {
                 Text(
-                    "FlowFrames Android 1.6.5 — a rewrite of the FlowFrames (Windows) pipeline for Android: " +
+                    "FlowFrames Android 1.6.6 — a rewrite of the FlowFrames (Windows) pipeline for Android: " +
                         "MediaCodec decoding, RIFE interpolation on the GPU (ncnn Vulkan) or the CPU, hardware encoding " +
                         "and MP4 muxing.",
                     fontSize = 12.sp,
@@ -562,35 +563,24 @@ private fun fpsLabel(fps: Double): String =
     if (fps % 1.0 == 0.0) String.format(Locale.US, "%.0f", fps)
     else String.format(Locale.US, "%.3f", fps).trimEnd('0').trimEnd('.')
 
-/** Off / 1-4 / Auto. "Off" runs one pair at a time with nothing overlapping, to measure the gain. */
+/** Slider: 1..4 inferences at a time, two by default. */
 @Composable
 private fun ParallelInferences(settings: Settings, onChange: ((Settings) -> Settings) -> Unit) {
+    val workers = settings.workers.coerceIn(Settings.MIN_WORKERS, Settings.MAX_WORKERS)
     Text(
-        "Parallel inferences: " + when {
-            settings.workers == Settings.WORKERS_OFF -> "off"
-            settings.workers == Settings.WORKERS_AUTO -> "automatic (2 on the GPU)"
-            else -> "${settings.workers} at a time"
-        },
+        "Parallel inferences: $workers at a time",
         fontWeight = FontWeight.SemiBold,
         fontSize = 13.sp
     )
-    listOf(
-        listOf(Settings.WORKERS_OFF to "Off", 1 to "1", 2 to "2"),
-        listOf(3 to "3", 4 to "4", Settings.WORKERS_AUTO to "Auto")
-    ).forEach { row ->
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            row.forEach { (v, label) ->
-                FilterChip(
-                    selected = settings.workers == v,
-                    onClick = { onChange { s -> s.copy(workers = v) } },
-                    label = { Text(label) }
-                )
-            }
-        }
-    }
+    Slider(
+        value = workers.toFloat(),
+        onValueChange = { v -> onChange { s -> s.copy(workers = v.toInt()) } },
+        valueRange = Settings.MIN_WORKERS.toFloat()..Settings.MAX_WORKERS.toFloat(),
+        steps = Settings.MAX_WORKERS - Settings.MIN_WORKERS - 1
+    )
     Caption(
-        "Off: one inference at a time and the next frames are only read once the previous ones are " +
-            "encoded, nothing overlaps. 1: one inference at a time, but decoding and encoding overlap it. " +
-            "2 or more: several inferences in flight, each with its own copy of the model (more memory)."
+        "How many inferences run at the same time: with 2, one computes while the other copies its frames " +
+            "in and out, which keeps the GPU busy. Each one holds its own copy of the model, so more costs " +
+            "RAM; 1 leaves the decoder and the encoder the whole machine."
     )
 }

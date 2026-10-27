@@ -34,7 +34,12 @@ class InferencePool(
     val workers: Int,
     /** Informational: CPU threads each worker uses (0 for a GPU engine). */
     val threadsPerWorker: Int,
-    private val log: (String) -> Unit = {}
+    private val log: (String) -> Unit = {},
+    /**
+     * False when the engines are borrowed from the start-up preparation ([com.flowframes.android.job.EngineWarmup]):
+     * closing the pool then leaves them open, so the next job reuses them.
+     */
+    private val ownsEngines: Boolean = true
 ) : AutoCloseable {
 
     /** Builds [workers] ONNX Runtime sessions, one per worker (the 1.4.0 behaviour). */
@@ -197,7 +202,7 @@ class InferencePool(
             log("Inference pool: a session was still busy at shutdown, it is left to the process")
             return
         }
-        engines.distinct().forEach { runCatching { it.close() } }
+        if (ownsEngines) engines.distinct().forEach { runCatching { it.close() } }
     }
 
     companion object {

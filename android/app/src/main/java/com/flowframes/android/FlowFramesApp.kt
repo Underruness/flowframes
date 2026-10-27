@@ -4,6 +4,7 @@ import android.app.Application
 import com.flowframes.android.core.CrashLog
 import com.flowframes.android.core.NcnnRifeEngine
 import com.flowframes.android.job.AppGraph
+import com.flowframes.android.job.EngineWarmup
 import com.flowframes.android.job.SettingsStore
 
 class FlowFramesApp : Application() {
@@ -22,6 +23,10 @@ class FlowFramesApp : Application() {
             NcnnRifeEngine.setShaderCacheDir(java.io.File(filesDir, "gpu-shader-cache"))
             CrashLog.nativeReportFile()?.let { NcnnRifeEngine.installCrashHandler(it) }
             if (CrashLog.gpuBuildCrashed) NcnnRifeEngine.setPipelineDiskCache(false)
+            // Build the GPU engine now, in the background, and in this thread — after the shader
+            // cache directory is set. Two minutes of shader compilation are paid here instead of at
+            // the first interpolation, which then starts immediately.
+            EngineWarmup.prepare(this, AppGraph.settings.current) { line -> AppGraph.jobs.addLog(line) }
         }, "shader-cache-init").start()
     }
 }

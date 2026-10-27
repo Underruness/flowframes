@@ -115,11 +115,21 @@ Prérequis : JDK 17, Android SDK (plateforme 34, build-tools 34.0.0).
 ```bash
 cd android
 echo "sdk.dir=/chemin/vers/android-sdk" > local.properties
-./gradlew assembleRelease          # APK arm64-v8a signé
+./gradlew assembleRelease          # les deux APK arm64-v8a signés
 ./gradlew assembleRelease -PallAbis=true   # + armeabi-v7a et x86_64 (émulateurs)
+./gradlew :app:assembleCapriRelease        # une seule édition
 ```
 
-Sortie : `app/build/outputs/apk/release/app-release.apk`.
+Deux éditions sortent du même moteur (`flavorDimensions = "edition"`) :
+
+| Édition | APK | Identifiant | Interface |
+|---|---|---|---|
+| `flowframes` | `app/build/outputs/apk/flowframes/release/app-flowframes-release.apk` | `com.flowframes.android` | l'écran historique |
+| `capri` | `app/build/outputs/apk/capri/release/app-capri-release.apk` | `com.flowframes.android.capri` | Material You (couleurs dynamiques du papier peint sur Android 12+), animations, logo Capri |
+
+Le moteur, le service, les réglages et le pipeline sont dans `src/main` ; chaque édition apporte son
+`MainActivity`, son écran, son nom et son logo. Les deux identifiants étant distincts, les deux
+applications s'installent côte à côte.
 
 ### Tests
 

@@ -108,8 +108,20 @@ object EngineFactory {
                 log("GPU engine: fp16 + coopmat, the first build compiles every pipeline (about 1.5 min on an Adreno 840, cached afterwards)…")
             }
             val c = choice
+            // Engines built at app start-up for exactly these settings: reusing them means the job
+            // begins now instead of waiting for the shader compilation (see EngineWarmup).
+            val warmed = if (gpu) EngineWarmup.borrow(settings, c, log) else null
             val pool = runCatching {
-                if (gpu) {
+                if (warmed != null) {
+                    // Borrowed engines: this pool must not close them, they serve the next job too.
+                    InferencePool(
+                        engines = warmed,
+                        workers = warmed.size,
+                        threadsPerWorker = if (c.cpuWorkers > 0) c.cpuThreads else 0,
+                        log = log,
+                        ownsEngines = false
+                    )
+                } else if (gpu) {
                     withHeartbeat("building the GPU engine", log) {
                         createWithTimeout(if (slowBuild) GPU_BUILD_COOP_TIMEOUT_S else GPU_BUILD_TIMEOUT_S) {
                             create(context, settings, c, width, height, log)
@@ -121,6 +133,7 @@ object EngineFactory {
                     val reason = t.message ?: t.javaClass.simpleName
                     failures += "${kind.label}: $reason"
                     log("Engine ${kind.label} unavailable: $reason")
+                    if (warmed != null) EngineWarmup.discard(reason, log)
                     null
                 } ?: continue
             val verdict = runCatching {
@@ -144,6 +157,8 @@ object EngineFactory {
             if (kind == EngineKind.NCNN_GPU) log("GPU: ${NcnnRifeEngine.gpuInfo(0)}")
             // A hung engine is still running native code: closing it would crash. Leak it instead.
             if (verdict.exceptionOrNull() !is java.util.concurrent.TimeoutException) runCatching { pool.close() }
+            // The prepared engines failed the self-test: drop them, they are rebuilt in the background.
+            if (warmed != null) EngineWarmup.discard(reason, log)
         }
         throw IllegalStateException("No inference engine works on this device: ${failures.joinToString(" · ")}")
     }
@@ -210,27 +225,9 @@ object EngineFactory {
         log: (String) -> Unit
     ): InferencePool = when (choice.kind) {
         EngineKind.NCNN_GPU, EngineKind.AUTO -> {
-            check(NcnnRifeEngine.isAvailable) { "native library missing" }
-            check(!gpuHung) { "the GPU hung earlier in this session; restart the app to retry it" }
-            check(NcnnRifeEngine.gpuCount() > 0) { "no Vulkan GPU" }
-            val dir = ModelStore.prepareNcnn(context, settings.ncnnModel, log)
-            val gpu = NcnnRifeEngine(
-                dir, gpuId = 0, cpuThreads = 2, padding = settings.ncnnModel.padding,
-                fp16 = settings.fp16, coopMatrix = settings.coopMatrix
-            )
-            val helper = if (choice.cpuWorkers > 0) {
-                runCatching {
-                    // fp32 on the CPU: ncnn's ARM fp16 kernels are a separate, unmeasured risk.
-                    NcnnRifeEngine(
-                        dir, gpuId = -1, cpuThreads = choice.cpuThreads,
-                        padding = settings.ncnnModel.padding, fp16 = false
-                    )
-                }.onFailure { log("CPU assist unavailable: ${it.message}") }.getOrNull()
-            } else null
-            val engines = ArrayList<FrameEngine>()
-            repeat(choice.workers) { engines += gpu }
-            if (helper != null) repeat(choice.cpuWorkers) { engines += helper }
-            InferencePool(engines, engines.size, if (helper != null) choice.cpuThreads else 0, log)
+            val engines = buildGpuEngines(context, settings, choice, log)
+            val hybrid = engines.any { it !== engines[0] }
+            InferencePool(engines, engines.size, if (hybrid) choice.cpuThreads else 0, log)
         }
         EngineKind.NCNN_CPU -> {
             check(NcnnRifeEngine.isAvailable) { "native library missing" }
@@ -252,6 +249,43 @@ object EngineFactory {
             frameHeight = height,
             log = log
         )
+    }
+
+    /**
+     * Engines of a GPU pool: the Vulkan engine repeated [Choice.workers] times (one ncnn engine is
+     * thread-safe, so every worker shares one copy of the model) plus, in hybrid mode,
+     * [Choice.cpuWorkers] CPU workers of [Choice.cpuThreads] threads each. The list has one entry per
+     * worker, which is what [InferencePool] indexes with its thread factory.
+     *
+     * Also used by [EngineWarmup], which builds the same list at app start-up and keeps it alive.
+     */
+    fun buildGpuEngines(
+        context: Context,
+        settings: Settings,
+        choice: Choice,
+        log: (String) -> Unit
+    ): List<FrameEngine> {
+        check(NcnnRifeEngine.isAvailable) { "native library missing" }
+        check(!gpuHung) { "the GPU hung earlier in this session; restart the app to retry it" }
+        check(NcnnRifeEngine.gpuCount() > 0) { "no Vulkan GPU" }
+        val dir = ModelStore.prepareNcnn(context, settings.ncnnModel, log)
+        val gpu = NcnnRifeEngine(
+            dir, gpuId = 0, cpuThreads = 2, padding = settings.ncnnModel.padding,
+            fp16 = settings.fp16, coopMatrix = settings.coopMatrix
+        )
+        val helper = if (choice.cpuWorkers > 0) {
+            runCatching {
+                // fp32 on the CPU: ncnn's ARM fp16 kernels are a separate, unmeasured risk.
+                NcnnRifeEngine(
+                    dir, gpuId = -1, cpuThreads = choice.cpuThreads,
+                    padding = settings.ncnnModel.padding, fp16 = false
+                )
+            }.onFailure { log("CPU assist unavailable: ${it.message}") }.getOrNull()
+        } else null
+        val engines = ArrayList<FrameEngine>()
+        repeat(choice.workers.coerceAtLeast(1)) { engines += gpu }
+        if (helper != null) repeat(choice.cpuWorkers) { engines += helper }
+        return engines
     }
 
     /** [selfTest] on a separate thread, so a GPU call that never returns cannot block the job. */

@@ -20,8 +20,8 @@ android {
         applicationId = "com.flowframes.android"
         minSdk = 26
         targetSdk = 34
-        versionCode = 14
-        versionName = "1.6.5"
+        versionCode = 15
+        versionName = "1.6.6"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Ship 64-bit ARM by default (every Android phone since ~2016).
@@ -33,6 +33,25 @@ android {
         ndk {
             abiFilters += explicitAbis
                 ?: if (allAbis) listOf("arm64-v8a", "armeabi-v7a", "x86_64") else listOf("arm64-v8a")
+        }
+    }
+
+    /**
+     * Two editions from one engine. `flowframes` is the historical app, with its own application id
+     * so it updates over 1.6.5; `capri` is the redesigned Material You edition, with a distinct id,
+     * so both install side by side. Shared pipeline code lives in `src/main`, each edition owns its
+     * `MainActivity` and its Compose UI, name, icon and window theme.
+     */
+    flavorDimensions += "edition"
+
+    productFlavors {
+        create("flowframes") {
+            dimension = "edition"
+            applicationId = "com.flowframes.android"
+        }
+        create("capri") {
+            dimension = "edition"
+            applicationId = "com.flowframes.android.capri"
         }
     }
 

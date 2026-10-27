@@ -59,11 +59,12 @@ data class Settings(
     /** 0 = automatic. */
     val threads: Int = 0,
     /**
-     * Inferences computed at the same time: [WORKERS_AUTO] = automatic (2 on the GPU, see
-     * [com.flowframes.android.core.InferencePool] on the CPU), 1..4 = that many, [WORKERS_OFF] = no
-     * overlap at all (one inference, and the next pair only starts once the previous one is encoded).
+     * Inferences computed at the same time, set with the slider ([MIN_WORKERS]..[MAX_WORKERS], two by
+     * default: one inference runs while the other copies its frames in and out). 1..4 = that many,
+     * [WORKERS_AUTO] = automatic, [WORKERS_OFF] = no overlap at all (one inference, and the next pair
+     * only starts once the previous one is encoded).
      */
-    val workers: Int = 1,
+    val workers: Int = 2,
     val outputTreeUri: String? = null,
     /** Runtime; AUTO picks the GPU when the phone's Vulkan driver passes the start-up self-test. */
     val engine: EngineKind = EngineKind.NCNN_GPU,
@@ -96,6 +97,10 @@ data class Settings(
     companion object {
         const val WORKERS_AUTO = -1
         const val WORKERS_OFF = 0
+
+        /** Range of the parallel-inference slider. */
+        const val MIN_WORKERS = 1
+        const val MAX_WORKERS = 4
     }
 
     fun planOptions(): com.flowframes.android.core.InterpPlan.Options = com.flowframes.android.core.InterpPlan.Options(
@@ -113,10 +118,11 @@ data class Settings(
 class SettingsStore(context: Context) {
 
     private companion object {
-        const val DEFAULTS_VERSION = 2
+        const val DEFAULTS_VERSION = 3
     }
 
-    private val prefs = context.applicationContext.getSharedPreferences("flowframes_settings", Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
+    private val prefs = appContext.getSharedPreferences("flowframes_settings", Context.MODE_PRIVATE)
     private val _state = MutableStateFlow(load())
 
     val state: StateFlow<Settings> get() = _state
@@ -124,17 +130,27 @@ class SettingsStore(context: Context) {
     val current: Settings get() = _state.value
 
     fun update(transform: (Settings) -> Settings) {
-        val next = transform(_state.value)
+        val before = _state.value
+        val next = transform(before)
         _state.value = next
         save(next)
+        // Settings that change how the GPU engine is built: prepare it again in the background,
+        // otherwise the next job would pay for the shader compilation itself.
+        val engineChanged = next.ncnnModel != before.ncnnModel || next.fp16 != before.fp16 ||
+            next.coopMatrix != before.coopMatrix || next.engine != before.engine ||
+            next.quality != before.quality
+        if (engineChanged) {
+            EngineWarmup.prepare(appContext, next) { line -> runCatching { AppGraph.jobs.addLog(line) } }
+        }
     }
 
     fun clearOutputFolder() = update { it.copy(outputTreeUri = null) }
 
     private fun load(): Settings {
         val d = Settings()
-        // 1.6.3 changed the defaults (source resolution, GPU, RIFE 4.6, 1 inference, HEVC, high
-        // bitrate): apply them once over what older versions saved, keep everything else.
+        // 1.6.3 and 1.6.6 changed the defaults (source resolution, GPU, RIFE 4.6, two parallel
+        // inferences, HEVC, high bitrate): apply them once over what older versions saved, keep
+        // everything else.
         if (prefs.getInt("defaultsVersion", 0) < DEFAULTS_VERSION && prefs.all.isNotEmpty()) {
             prefs.edit()
                 .putInt("maxLongSide", d.maxLongSide)

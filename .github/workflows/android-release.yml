@@ -38,34 +38,59 @@ jobs:
           else
             echo "No release key secret: the APK is signed with the debug key"
           fi
-      - name: Build release APK
+      - name: Build the release APKs (FlowFrames + Capri)
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon assembleRelease
-          cp app/build/outputs/apk/release/app-release.apk FlowFrames-Android.apk
           BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
-          if [ -f keystore.properties ]; then
-            # Gradle drops the v1 (JAR) signature when minSdk >= 24, but some installers (Honor
-            # MagicOS) only read v1 and refuse the APK ("does not contain any certificates").
-            # Re-sign with v1 + v2 + v3.
-            PW=$(grep '^storePassword=' keystore.properties | cut -d= -f2-)
-            $BT/zipalign -f -p 4 FlowFrames-Android.apk aligned.apk
-            $BT/apksigner sign --ks release.jks --ks-pass "pass:$PW" --ks-key-alias flowframes \
-              --key-pass "pass:$PW" --min-sdk-version 21 --v1-signing-enabled true \
-              --v2-signing-enabled true --v3-signing-enabled true --out FlowFrames-Android.apk aligned.apk
-            rm -f aligned.apk FlowFrames-Android.apk.idsig
-          fi
-          $BT/apksigner verify --verbose --print-certs --min-sdk-version 21 FlowFrames-Android.apk | head -8
-          $BT/apksigner verify --min-sdk-version 21 -v FlowFrames-Android.apk | grep -q "v1 scheme (JAR signing): true" || [ ! -f keystore.properties ]
+          cp app/build/outputs/apk/flowframes/release/app-flowframes-release.apk FlowFrames-Android.apk
+          cp app/build/outputs/apk/capri/release/app-capri-release.apk Capri-Android.apk
+          for apk in FlowFrames-Android.apk Capri-Android.apk; do
+            echo "=== $apk"
+            if [ -f keystore.properties ]; then
+              # Gradle drops the v1 (JAR) signature when minSdk >= 24, but some installers (Honor
+              # MagicOS) only read v1 and refuse the APK ("does not contain any certificates").
+              # Re-sign with v1 + v2 + v3.
+              PW=$(grep '^storePassword=' keystore.properties | cut -d= -f2-)
+              $BT/zipalign -f -p 4 "$apk" aligned.apk
+              $BT/apksigner sign --ks release.jks --ks-pass "pass:$PW" --ks-key-alias flowframes \
+                --key-pass "pass:$PW" --min-sdk-version 21 --v1-signing-enabled true \
+                --v2-signing-enabled true --v3-signing-enabled true --out "$apk" aligned.apk
+              rm -f aligned.apk "$apk.idsig"
+            fi
+            $BT/apksigner verify --verbose --print-certs --min-sdk-version 21 "$apk" | head -8
+            $BT/apksigner verify --min-sdk-version 21 -v "$apk" | grep -q "v1 scheme (JAR signing): true" || [ ! -f keystore.properties ]
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: FlowFrames-Android-apk
-          path: android/FlowFrames-Android.apk
+          path: |
+            android/FlowFrames-Android.apk
+            android/Capri-Android.apk
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: android/FlowFrames-Android.apk
+          files: |
+            android/FlowFrames-Android.apk
+            android/Capri-Android.apk
           prerelease: true
           name: FlowFrames Android ${{ github.ref_name }}
-          body: "APK arm64 : RIFE sur le GPU via ncnn + Vulkan, repli automatique sur CPU. Signé (v1 + v2 + v3, compatible avec l'installateur Honor) avec la clé de release FlowFrames : inutile de le re-signer. Désinstaller une fois l'ancienne version si l'installation est refusée (clé différente)."
+          body: |
+            Deux APK arm64 dans cette release :
+
+            * **FlowFrames-Android.apk** — l'application historique : interpolation RIFE sur le GPU via
+              ncnn + Vulkan, repli automatique sur le CPU si le pilote échoue.
+            * **Capri-Android.apk** — la nouvelle édition : interface Material You (couleurs dynamiques
+              du fond d'écran sur Android 12+, animations, nouveau logo), mêmes moteurs et mêmes
+              réglages. Elle s'installe à côté de FlowFrames (identifiant distinct), les deux peuvent
+              donc coexister.
+
+            Les deux APK sont signés (v1 + v2 + v3, compatible avec l'installateur Honor) avec la clé de
+            release FlowFrames : inutile de les re-signer. Désinstaller une fois l'ancienne version si
+            Android refuse l'installation (clé différente).
+
+            Depuis la 1.6.6, le moteur GPU est préparé au démarrage de l'application : le premier
+            lancement compile les shaders et convertit les poids en arrière-plan, puis chaque
+            interpolation démarre immédiatement. Les inférences parallèles se règlent avec un curseur
+            (2 par défaut).

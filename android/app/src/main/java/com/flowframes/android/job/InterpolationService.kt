@@ -132,6 +132,9 @@ class InterpolationService : Service() {
                 stopForegroundCompat()
                 stopSelf()
             }
+            // The GPU engines stay alive for the next queue, and stale ones are rebuilt in the
+            // background: the next interpolation starts without waiting for the shader build.
+            EngineWarmup.onQueueFinished(this, AppGraph.settings.current) { line -> AppGraph.jobs.addLog(line) }
             if (completed > 0) {
                 AppGraph.jobs.addLog("Queue finished: $completed job(s) processed")
             }
@@ -160,7 +163,7 @@ class InterpolationService : Service() {
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_flowframes)
-            .setContentTitle("FlowFrames")
+            .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
             .setProgress(100, percent.coerceIn(0, 100), percent <= 0)
             .setOngoing(ongoing)

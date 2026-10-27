@@ -106,7 +106,17 @@ class NcnnRifeEngine(
             if (!isAvailable) return
             dir.mkdirs()
             runCatching { nativeSetShaderCacheDir(dir.absolutePath) }
+            shaderCacheDirReady = true
         }
+
+        /**
+         * True once [setShaderCacheDir] ran. An engine built before it compiles every shader again on
+         * the next run, so the start-up preparation waits for it
+         * ([com.flowframes.android.job.EngineWarmup]).
+         */
+        @Volatile
+        var shaderCacheDirReady: Boolean = false
+            private set
 
         /** Compile counts, time spent and cache hits since the process started. */
         fun shaderCacheStats(): String = if (isAvailable) runCatching { nativeShaderCacheStats() }.getOrDefault("") else ""
