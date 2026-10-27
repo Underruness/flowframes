@@ -17,5 +17,6 @@ app/keystore/*.keystore
 app/src/main/cpp/ncnn-android
 app/src/main/cpp/ncnn-*-android-vulkan.zip
 
-# ncnn RIFE weights (the root .gitignore drops every *.bin)
+# ncnn RIFE models (the root .gitignore drops every *.bin and *.param)
 !app/src/main/assets/ncnn/**/flownet.bin
+!app/src/main/assets/ncnn/**/flownet.param
