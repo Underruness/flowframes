@@ -14,6 +14,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -31,6 +32,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.flowframes.android.job.AppGraph
+import com.flowframes.android.core.RifeEngine
 import com.flowframes.android.job.EngineBenchmark
 import com.flowframes.android.job.InterpolationService
 import com.flowframes.android.job.JobItem
@@ -61,6 +63,7 @@ class MainActivity : ComponentActivity() {
         val running by AppGraph.jobs.running.collectAsState()
         val settings by AppGraph.settings.state.collectAsState()
         val benchmark by AppGraph.jobs.benchmark.collectAsState()
+        val benchmarkBest by AppGraph.jobs.benchmarkBest.collectAsState()
         val benchmarkRunning by AppGraph.jobs.benchmarkRunning.collectAsState()
         val scope = rememberCoroutineScope()
         var showSettings by remember { mutableStateOf(false) }
@@ -87,7 +90,7 @@ class MainActivity : ComponentActivity() {
                 AppGraph.jobs.benchmarkRunning.value = true
                 AppGraph.jobs.addLog("▶ Engine benchmark started")
                 scope.launch {
-                    val report = withContext(Dispatchers.Default) {
+                    val result = withContext(Dispatchers.Default) {
                         runCatching {
                             EngineBenchmark.run(
                                 context = this@MainActivity,
@@ -95,11 +98,14 @@ class MainActivity : ComponentActivity() {
                                 report = { line -> AppGraph.jobs.addLog(line) }
                             )
                         }.getOrElse { t ->
-                            "=== FLOWFRAMES ENGINE BENCHMARK ===\n" +
-                                "Benchmark failed: ${t.message ?: t.javaClass.simpleName}"
+                            EngineBenchmark.Report(
+                                "=== FLOWFRAMES ENGINE BENCHMARK ===\n" +
+                                    "Benchmark failed: ${t.message ?: t.javaClass.simpleName}",
+                                null
+                            )
                         }
                     }
-                    AppGraph.jobs.benchmark.value = report
+                    AppGraph.jobs.setBenchmark(result.text, result.best)
                     AppGraph.jobs.benchmarkRunning.value = false
                 }
             }
@@ -178,7 +184,7 @@ class MainActivity : ComponentActivity() {
 
         benchmark?.let { report ->
             AlertDialog(
-                onDismissRequest = { AppGraph.jobs.setBenchmark(null) },
+                onDismissRequest = { AppGraph.jobs.setBenchmark(null, null) },
                 title = { Text("Engine benchmark", fontSize = 16.sp) },
                 text = {
                     Text(
@@ -189,7 +195,26 @@ class MainActivity : ComponentActivity() {
                     )
                 },
                 confirmButton = {
-                    TextButton(onClick = { AppGraph.jobs.setBenchmark(null) }) { Text("Close") }
+                    Row {
+                        benchmarkBest?.let { best ->
+                            TextButton(onClick = {
+                                AppGraph.settings.update { s ->
+                                    s.copy(
+                                        // 0 keeps "automatic", so a later CPU change still adapts.
+                                        threads = if (best.threads == RifeEngine.defaultThreads()) 0 else best.threads,
+                                        useXnnpack = best.useXnnpack,
+                                        parallelOps = best.parallelOps,
+                                        useNnapi = false
+                                    )
+                                }
+                                AppGraph.jobs.addLog(
+                                    "Applied benchmark winner: ${best.label} (${best.msPerFrame.toInt()} ms/frame)"
+                                )
+                                AppGraph.jobs.setBenchmark(null, null)
+                            }) { Text("Apply best") }
+                        }
+                        TextButton(onClick = { AppGraph.jobs.setBenchmark(null, null) }) { Text("Close") }
+                    }
                 },
                 dismissButton = {
                     TextButton(onClick = {

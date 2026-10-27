@@ -131,14 +131,32 @@ fun SettingsScreen(
                 Caption("\"High quality\" runs RIFE in ensemble mode: fewer artefacts, roughly twice as slow.")
 
                 SwitchRow(
+                    title = "XNNPACK provider",
+                    description = "Off by default: RIFE's GridSample warping is not supported by XNNPACK, so it only adds " +
+                        "layout conversions. The benchmark measured the plain CPU path ~8% faster on a Snapdragon 8 Elite.",
+                    checked = settings.useXnnpack,
+                    onCheckedChange = { v -> onChange { s -> s.copy(useXnnpack = v) } }
+                )
+
+                SwitchRow(
+                    title = "Parallel operators",
+                    description = "Runs independent branches of the network at the same time instead of one operator " +
+                        "after another. Helps when the graph has parallel branches; measure it.",
+                    checked = settings.parallelOps,
+                    onCheckedChange = { v -> onChange { s -> s.copy(parallelOps = v) } }
+                )
+
+                SwitchRow(
                     title = "NNAPI acceleration",
-                    description = "Uses the neural processor when the driver supports it. Many devices fall back to the CPU silently, so measure before trusting it.",
+                    description = "Not recommended: it was 6x slower than the CPU here (5.4 s/frame against 0.8 s), " +
+                        "and most drivers fall back to the CPU without saying so. Only enable it if the benchmark wins.",
                     checked = settings.useNnapi,
                     onCheckedChange = { v -> onChange { s -> s.copy(useNnapi = v) } }
                 )
 
                 Text(
-                    "CPU threads: " + if (settings.threads == 0) "automatic" else settings.threads.toString(),
+                    "CPU threads: " +
+                        if (settings.threads == 0) "automatic (cores - 2, at most 6)" else "${settings.threads} (manual)",
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 13.sp
                 )
@@ -148,7 +166,10 @@ fun SettingsScreen(
                     valueRange = 0f..8f,
                     steps = 7
                 )
-                Caption("More threads is not always faster: on big.LITTLE chips the small cores can slow the matrix kernels down.")
+                Caption(
+                    "Automatic leaves two cores for the decoder, the encoder and the pixel conversion. Using every " +
+                        "core measured 25-30% slower on a real job, even though it looks slightly faster in a short test."
+                )
             }
 
             Section("Output video") {
@@ -281,8 +302,9 @@ fun SettingsScreen(
             Section("Diagnostics") {
                 Text(
                     "The engine benchmark loads the model several ways (execution provider, thread count, " +
-                        "static shapes) and reports the real cost per frame on this device. It takes about " +
-                        "15 seconds and writes the result to the log.",
+                        "execution mode, static shapes), adds a sustained pass to expose throttling, and reports " +
+                        "the real cost per frame on this device. It takes about a minute and writes the result " +
+                        "to the log, which stays copyable.",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -299,14 +321,15 @@ fun SettingsScreen(
                     OutlinedButton(onClick = onShareLogs) { Text("Share logs", fontSize = 12.sp) }
                 }
                 Caption(
-                    "Logs include device model, core count, thermal status, execution provider, " +
-                        "per-stage timings and inference latency percentiles."
+                    "Logs include device model, core count, thermal status, engine configuration, per-stage " +
+                        "timings, inference latency percentiles with their drift, per-minute progress and a " +
+                        "diagnosis line naming the bottleneck."
                 )
             }
 
             Section("About") {
                 Text(
-                    "FlowFrames Android 1.2.0 — a rewrite of the FlowFrames (Windows) pipeline for Android: " +
+                    "FlowFrames Android 1.3.0 — a rewrite of the FlowFrames (Windows) pipeline for Android: " +
                         "MediaCodec decoding, RIFE 4.9 interpolation through ONNX Runtime, hardware encoding " +
                         "and MP4 muxing.",
                     fontSize = 12.sp,

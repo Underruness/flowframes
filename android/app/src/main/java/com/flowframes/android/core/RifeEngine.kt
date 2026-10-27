@@ -25,7 +25,9 @@ class RifeEngine(
     modelPath: String,
     intraOpThreads: Int = 4,
     useNnapi: Boolean = false,
-    useXnnpack: Boolean = true,
+    useXnnpack: Boolean = false,
+    /** Run independent branches of the graph concurrently instead of one operator at a time. */
+    parallelOps: Boolean = false,
     frameWidth: Int = 0,
     frameHeight: Int = 0,
     profileDir: File? = null,
@@ -42,6 +44,7 @@ class RifeEngine(
     val modelName: String = File(modelPath).name
     val staticShapes: Boolean
     val threads: Int
+    val providers: String
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     private val session: OrtSession
@@ -55,7 +58,10 @@ class RifeEngine(
         threads = if (intraOpThreads > 0) intraOpThreads else defaultThreads()
         val opts = OrtSession.SessionOptions()
         opts.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-        opts.setExecutionMode(OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL)
+        opts.setExecutionMode(
+            if (parallelOps) OrtSession.SessionOptions.ExecutionMode.PARALLEL
+            else OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL
+        )
         opts.setIntraOpNumThreads(threads)
         opts.setInterOpNumThreads(1)
 
@@ -72,6 +78,10 @@ class RifeEngine(
             }
         }
         staticShapes = static
+        providers = buildString {
+            if (useNnapi) append("NNAPI,")
+            append(if (useXnnpack) "XNNPACK" else "CPU")
+        }
 
         if (useNnapi) {
             runCatching { opts.addNnapi() }
@@ -116,8 +126,9 @@ class RifeEngine(
             "$name[$dims]"
         }
         log(
-            "ORT ${runCatching { env.version }.getOrDefault("?")}: $modelName · $shape · $threads threads · " +
-                "EP ${if (useNnapi) "NNAPI," else ""}${if (useXnnpack) "XNNPACK" else "CPU"} · inputs: $inputsSummary"
+            "Engine: ONNX Runtime ${runCatching { env.version }.getOrDefault("?")} · $modelName · $shape · " +
+                "$threads threads · $providers · ${if (parallelOps) "parallel" else "sequential"} ops · " +
+                "inputs: $inputsSummary"
         )
     }
 
@@ -228,11 +239,16 @@ class RifeEngine(
 
     companion object {
         /**
-         * Default worker threads. The decoder and encoder are hardware blocks that mostly sleep, so
-         * using every core for inference is faster than reserving some of them.
+         * Default worker threads: every core but two, capped at 6.
+         *
+         * Using *all* cores is measurably slower for a sustained job, even though it looks fine in a
+         * short benchmark. The decoder, the encoder and the pixel conversion need cores of their own;
+         * when the inference pool takes them all, the job thread pool spins against the codec threads
+         * and the whole pipeline loses about a third of its throughput (measured: 1.20 → 0.90 source
+         * fps on a Snapdragon 8 Elite when this went from `cores - 2` to `cores`).
          */
         fun defaultThreads(): Int = Runtime.getRuntime().availableProcessors().let {
-            if (it <= 2) 1 else it.coerceAtMost(8)
+            if (it <= 2) 1 else (it - 2).coerceAtMost(6)
         }
     }
 }

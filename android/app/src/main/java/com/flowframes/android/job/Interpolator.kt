@@ -66,6 +66,9 @@ private class StageTiming {
         }
     }
 
+    /** Mean of the most recent inference samples, for the per-minute heartbeat. */
+    fun recentInferenceMs(): Double = inferenceMs.recentMeanMs()
+
     /** Throughput so far, ignoring inference still running. */
     fun rate(frames: Int): String {
         val totalNs = decodeNs + inferNs + encodeNs
@@ -140,15 +143,23 @@ class Interpolator(
             }
 
             val modelPath = ModelStore.prepare(context, settings.quality, log)
-            val threads = if (settings.threads > 0) settings.threads else RifeEngine.defaultThreads()
+            val automatic = RifeEngine.defaultThreads()
+            val threads = if (settings.threads > 0) settings.threads else automatic
+            log(
+                "Threads: $threads" +
+                    (if (settings.threads > 0) " (manual)" else " (automatic: cores - 2, capped at 6)") +
+                    " · ${settings.factor - 1} inference(s) per source frame"
+            )
             if (settings.useNnapi) {
-                log("NNAPI requested: falls back to CPU silently on many drivers, compare with the benchmark")
+                log("NNAPI requested: it was 6x slower than the CPU on a Snapdragon 8 Elite. Run the benchmark to compare on this device.")
             }
 
             RifeEngine(
                 modelPath = modelPath,
                 intraOpThreads = threads,
                 useNnapi = settings.useNnapi,
+                useXnnpack = settings.useXnnpack,
+                parallelOps = settings.parallelOps,
                 frameWidth = targetW,
                 frameHeight = targetH,
                 log = log
@@ -253,6 +264,7 @@ class Interpolator(
         var written = 0
         var skippedDuplicates = 0
         var cuts = 0
+        var interpolatedPairs = 0
         val phases = InterpPlan.phases(factor)
         val planOptions = settings.planOptions()
         val timing = StageTiming()
@@ -262,6 +274,10 @@ class Interpolator(
         } else 1000
         // A 576x576 RIFE pass costs ~380 ms on current phones, so 30 s in is enough to sample.
         val heatCheckAfter = 90
+        // A long job is where throttling shows up, so the log gets a heartbeat every minute.
+        val heartbeatEveryNs = 60_000_000_000L
+        var lastBeatNs = System.nanoTime()
+        var lastBeatDecoded = 0
 
         while (true) {
             checkCancelled()
@@ -312,6 +328,7 @@ class Interpolator(
 
                 InterpPlan.Decision.INTERPOLATE -> {
                     val span = frame.ptsUs - lastPts
+                    interpolatedPairs++
                     for (t in phases) {
                         checkCancelled()
                         timing.infer {
@@ -332,6 +349,23 @@ class Interpolator(
                 (0.98f * decoded / expectedFrames.toFloat()).coerceIn(0f, 0.98f),
                 "Frame $decoded/$expectedFrames · $written out · ${timing.rate(decoded)} source fps"
             )
+
+            val now = System.nanoTime()
+            if (now - lastBeatNs >= heartbeatEveryNs) {
+                val beatSeconds = (now - lastBeatNs) / 1_000_000_000.0
+                val instant = if (beatSeconds > 0) (decoded - lastBeatDecoded) / beatSeconds else 0.0
+                log(
+                    String.format(
+                        Locale.US,
+                        "Progress: %d frames (%d out) · %.2f source fps overall · %.2f fps over the last %.0f s · " +
+                            "inference %.0f ms/frame over the last minute · thermal %s · heap %d/%d MB",
+                        decoded, written, timing.rate(decoded).toDoubleOrNull() ?: 0.0, instant, beatSeconds,
+                        timing.recentInferenceMs(), thermal(), heapUsedMb(), heapMaxMb()
+                    )
+                )
+                lastBeatNs = now
+                lastBeatDecoded = decoded
+            }
         }
 
         if (skippedDuplicates > 0) log("Deduplication: $skippedDuplicates duplicate frame(s) skipped")
@@ -360,8 +394,78 @@ class Interpolator(
         val wallMs = (System.nanoTime() - wallStart) / 1_000_000
         val overheadMs = wallMs - timing.totalNs() / 1_000_000
         log("Wall time: $wallMs ms (pipeline ${timing.totalNs() / 1_000_000} ms, overhead $overheadMs ms)")
+        log("Frames: $decoded decoded · $interpolatedPairs pairs interpolated (x$factor) · " +
+            "$cuts scene cut(s) · $skippedDuplicates duplicate(s) skipped · $written written")
         log("Thermal status at end: ${thermal()}")
+        log(diagnosis(decoded, timing, wallMs.toDouble(), width, height, factor))
         return written
+    }
+
+    private fun heapUsedMb(): Long {
+        val rt = Runtime.getRuntime()
+        return (rt.totalMemory() - rt.freeMemory()) / (1024 * 1024)
+    }
+
+    private fun heapMaxMb(): Long = Runtime.getRuntime().maxMemory() / (1024 * 1024)
+
+    /**
+     * Turns the stage timings into one actionable sentence. The numbers decide the advice: the fix
+     * for a model-bound job (lower the resolution) is the opposite of the fix for a codec-bound one.
+     */
+    private fun diagnosis(
+        decoded: Int,
+        timing: StageTiming,
+        wallMs: Double,
+        width: Int,
+        height: Int,
+        factor: Int
+    ): String {
+        val total = timing.totalNs().coerceAtLeast(1)
+        val infer = timing.inferNs * 100.0 / total
+        val decode = timing.decodeNs * 100.0 / total
+        val encode = timing.encodeNs * 100.0 / total
+        val perInfer = if (timing.inferCalls > 0) timing.inferNs / 1_000_000.0 / timing.inferCalls else 0.0
+        var line = String.format(
+            Locale.US,
+            "Diagnosis: inference %.0f%% · decode+convert %.0f%% · encode %.0f%% of wall time. ",
+            infer, decode, encode
+        )
+        line += when {
+            infer >= 85 -> {
+                val areaNow = (width.toDouble() * height).coerceAtLeast(1.0)
+                val saving = ((1.0 - (854.0 * 480.0) / areaNow).coerceIn(0.0, 0.9) * 100).toInt()
+                String.format(
+                    Locale.US,
+                    "The RIFE model is the limit (%.0f ms/frame): the codecs and pixel conversions are not worth " +
+                        "optimising further. Cost scales with the pixel count, so 480p instead of %dx%d would cut it " +
+                        "by about %d%%, and every extra multiplier step adds one more inference per pair " +
+                        "(x%d costs %d times x2).",
+                    perInfer, width, height, saving, factor, factor - 1
+                )
+            }
+            decode >= 30 ->
+                "Decoding is the limit, which usually means a codec without hardware support or a very high source resolution. " +
+                    "Re-encode the source once with a hardware-friendly codec before interpolating."
+            encode >= 30 ->
+                "Encoding is the limit: the bitrate or the output resolution is heavy for this device. " +
+                    "Try a lower bitrate preset or HEVC, which most phones encode in hardware."
+            else -> "No single stage dominates; the job is balanced."
+        }
+        if (timing.inferenceMs.hasDrift()) {
+            val drift = timing.inferenceMs.driftPercent()
+            if (drift > 10.0) {
+                line += String.format(
+                    Locale.US,
+                    " Inference got %.0f%% slower between the first and the last frames: the phone is throttling. " +
+                        "Splitting long videos into shorter runs, or dropping the resolution, keeps the average up.",
+                    drift
+                )
+            }
+        }
+        if (wallMs > 0 && decoded > 0) {
+            line += String.format(Locale.US, " End-to-end: %.2f s per source frame.", wallMs / 1000.0 / decoded)
+        }
+        return line
     }
 
     private fun thermal(): String = runCatching {

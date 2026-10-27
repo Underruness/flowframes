@@ -28,6 +28,7 @@ class JobStore {
     val logs = MutableStateFlow<List<String>>(emptyList())
     val running = MutableStateFlow(false)
     val benchmark = MutableStateFlow<String?>(null)
+    val benchmarkBest = MutableStateFlow<EngineBenchmark.Best?>(null)
     val benchmarkRunning = MutableStateFlow(false)
 
     @Volatile
@@ -68,8 +69,9 @@ class JobStore {
         logs.value = emptyList()
     }
 
-    fun setBenchmark(text: String?) {
+    fun setBenchmark(text: String?, best: EngineBenchmark.Best? = null) {
         benchmark.value = text
+        benchmarkBest.value = best
     }
 
     fun requestCancel() {

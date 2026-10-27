@@ -202,7 +202,8 @@ intermédiaires alloués par image.
 * Les images interpolées sont écrites **directement en YUV** pour l'encodeur, sans repasser par une
 image ARGB.
 * Les deux métriques de dé-duplication sont calculées en une passe.
-* L'inférence utilise par défaut tous les cœurs (8 sur un SoC récent) au lieu d'en réserver deux.
+* L'inférence conserve deux cœurs pour les codecs (`cores - 2`, plafonné à 6). La 1.1.0 avait
+tenté de tout prendre : c'était une régression, voir la section 1.3.0.
 
 **L'inférence RIFE reste le poste dominant** : ~800 ms/image à 720p sur cette VM x86 (sans
 XNNPACK, qui n'existe pas dans le jar desktop), quelques centaines de ms sur un SoC mobile où
@@ -243,10 +244,11 @@ contourne. Ce qui a donc été corrigé :
 * **Graphe plié.** Avec des formes connues, ORT replie les ~130 nœuds de calcul de formes :
   412 → 255 nœuds, soit −15 % de temps par image mesurés ici (`tools/compare_variants.py`),
   sortie identique au bit près.
-* **Banc d'essai embarqué.** Les réglages exposent « Run engine benchmark » : cinq configurations
-  (XNNPACK, CPU seul, NNAPI, 4 ou 8 threads, formes figées ou dynamiques) sont chronométrées sur
-  l'appareil, avec le profil par opérateur de la meilleure, et le rapport est copiable. C'est la
-  seule façon de savoir ce qui gagne réellement sur un SoC donné.
+* **Banc d'essai embarqué.** Les réglages exposent « Run engine benchmark » : six configurations
+  (CPU ou XNNPACK, threads automatiques ou tous les cœurs, opérateurs séquentiels ou parallèles,
+  formes figées ou dynamiques, plus NNAPI si l'option est active) sont chronométrées sur
+  l'appareil, avec le profil par opérateur, et le rapport est copiable. C'est la seule façon de
+  savoir ce qui gagne réellement sur un SoC donné.
 * **Logs détaillés.** Chaque tâche journalise l'appareil (modèle, cœur, RAM, statut thermique),
   le fournisseur d'exécution, les formes, le temps par étage, la répartition en pourcentage et les
   percentiles de latence d'inférence (min/médiane/p95/max), avec boutons « Copy » et « Share ».
@@ -266,6 +268,55 @@ Pistes examinées et écartées, chiffres à l'appui :
 
 Le vrai levier restant est le modèle : à qualité comparable, un réseau plus léger (RIFE-lite)
 coûterait plusieurs fois moins cher. C'est un changement de modèle, pas d'optimisation.
+
+### Version 1.3.0 — la régression de threading, et des réglages mesurés
+
+Constat de l'utilisateur : le débit est passé de ~1,20 à ~0,90 image source/s entre la 1.0.0 et la
+1.1.0, et NNAPI aggrave encore les choses. Le diff explique la régression : la 1.0.0 appelait
+`defaultThreads() = (cores - 2).coerceAtMost(6)`, la 1.1.0 l'a remplacé par `cores` (8 threads),
+sur l'hypothèse que les codecs matériels dorment et qu'il suffisait de tout donner au modèle.
+L'hypothèse est fausse sur une tâche longue.
+
+Banc d'essai embarqué sur HONOR AAP-AN00 (Snapdragon 8 Elite, 8 cœurs, Android 17), canevas
+1280×736, 3 runs par configuration :
+
+| Configuration | ms/image | Écart |
+|---|---|---|
+| CPU seul, 8 threads, formes figées | **814,5** | référence |
+| XNNPACK, 4 threads, formes figées | 857,8 | +5 % |
+| XNNPACK, 8 threads, formes figées | 885,0 | +9 % |
+| XNNPACK, 8 threads, formes dynamiques | 909,7 | +12 % |
+| NNAPI + XNNPACK, 8 threads | 5491,8 | ×6,7 |
+
+Trois enseignements, tous contraires à ce que supposaient les réglages précédents :
+
+* **XNNPACK perd** sur ce graphe (885 contre 814). `GridSample`, `Div` et `Transpose` ne sont pas
+  couverts par XNNPACK : il ne fait que payer des conversions de layout. Le moteur utilise donc le
+  chemin CPU (MLAS) par défaut, et XNNPACK est devenu une option mesurable.
+* **NNAPI est une catastrophe** (5,5 s/image, ×6,7). Ce n'est plus une simple option « au cas où » :
+  l'interface le déconseille explicitement.
+* **Plus de threads n'est pas plus rapide**, même dans un test court (4T bat 8T). Le nombre de
+  threads est donc revenu à `cores - 2` (6 ici), ce qui laisse deux cœurs au décodeur, à
+  l'encodeur et à la conversion de pixels.
+
+Le banc d'essai ne pouvait pas voir la régression, parce qu'il mesure des images isolées sur
+quelques secondes : ni la contention avec les codecs ni le throttling thermique n'y apparaissent.
+Il mesure maintenant **aussi** une passe soutenue de 16 inférences sur le gagnant et rapporte la
+dérivée entre les premières et les dernières (`drift +X%`), avec le statut thermique avant/après.
+Chaque configuration est également exprimée en **ms/MPx** et en images source/s prévues, pour
+pouvoir comparer un canevas donné avec celui d'une tâche réelle ; le bouton « Apply best » écrit la
+configuration gagnante dans les réglages.
+
+Autres ajouts de journalisation, tous copiables depuis les réglages :
+
+* configuration réelle du moteur (Runtime, modèle, formes, threads, fournisseur, mode d'exécution) ;
+* une ligne `Progress:` par minute avec débit instantané, latence d'inférence de la dernière minute,
+  statut thermique et occupation du tas ;
+* `drift` dans les percentiles d'inférence (min/médiane/p95/p99/max), calculé entre les 64
+  premières et les 64 dernières mesures ;
+* comptabilité exacte des images (`décodées · paires interpolées · coupes · doublons · écrites`) ;
+* une ligne `Diagnosis:` qui nomme le poste dominant et donne la conséquence chiffrée (par exemple
+  le gain attendu en passant à 480p), et signale un throttling supérieur à 10 %.
 
 ## Limites connues
 

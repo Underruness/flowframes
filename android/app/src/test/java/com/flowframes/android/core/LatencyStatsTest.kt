@@ -47,6 +47,37 @@ class LatencyStatsTest {
     }
 
     @Test
+    fun `drift stays silent until both windows are full`() {
+        val stats = LatencyStats()
+        repeat(10) { stats.add(380) }
+        assertTrue(!stats.hasDrift())
+        assertEquals(0.0, stats.driftPercent(), 1e-9)
+        assertTrue(!stats.summary("Inference").contains("drift"))
+    }
+
+    @Test
+    fun `throttling shows up as positive drift`() {
+        val stats = LatencyStats()
+        // 64 fast frames, then 64 frames twice as slow: the mean alone would hide this.
+        repeat(64) { stats.add(380) }
+        repeat(64) { stats.add(760) }
+        assertTrue(stats.hasDrift())
+        assertEquals(100.0, stats.driftPercent(), 0.5)
+        assertEquals(380.0, stats.openingMeanMs(), 1e-9)
+        assertEquals(760.0, stats.recentMeanMs(), 1e-9)
+        assertTrue(stats.summary("Inference").contains("drift +100%"))
+    }
+
+    @Test
+    fun `a steady run reports no drift`() {
+        val stats = LatencyStats()
+        repeat(200) { stats.add(380) }
+        assertTrue(stats.hasDrift())
+        assertEquals(0.0, stats.driftPercent(), 1e-9)
+        assertTrue(stats.summary("Inference").contains("steady"))
+    }
+
+    @Test
     fun `buffer capacity truncates samples but not the aggregates`() {
         val stats = LatencyStats(capacity = 4)
         repeat(20) { stats.add(if (it == 19) 4000 else 100) }

@@ -31,6 +31,14 @@ data class Settings(
     /** 0 disables the output FPS limit. */
     val maxOutputFps: Double = 0.0,
     val useNnapi: Boolean = false,
+    /**
+     * XNNPACK execution provider. Measured on a Snapdragon 8 Elite, CPU (MLAS) won by ~8 %: this
+     * graph's GridSample/Div/Transpose operators are not covered by XNNPACK, so it only pays for
+     * layout conversions. The in-app benchmark is the arbiter for any other device.
+     */
+    val useXnnpack: Boolean = false,
+    /** Run independent graph branches concurrently (ONNX Runtime PARALLEL execution mode). */
+    val parallelOps: Boolean = false,
     /** 0 = automatic. */
     val threads: Int = 0,
     val outputTreeUri: String? = null
@@ -83,6 +91,8 @@ class SettingsStore(context: Context) {
             namePattern = prefs.getString("namePattern", d.namePattern) ?: d.namePattern,
             maxOutputFps = prefs.getFloat("maxOutputFps", d.maxOutputFps.toFloat()).toDouble(),
             useNnapi = prefs.getBoolean("useNnapi", d.useNnapi),
+            useXnnpack = prefs.getBoolean("useXnnpack", d.useXnnpack),
+            parallelOps = prefs.getBoolean("parallelOps", d.parallelOps),
             threads = prefs.getInt("threads", d.threads).coerceIn(0, 16),
             outputTreeUri = prefs.getString("outputTreeUri", d.outputTreeUri)
         )
@@ -104,6 +114,8 @@ class SettingsStore(context: Context) {
             .putString("namePattern", s.namePattern)
             .putFloat("maxOutputFps", s.maxOutputFps.toFloat())
             .putBoolean("useNnapi", s.useNnapi)
+            .putBoolean("useXnnpack", s.useXnnpack)
+            .putBoolean("parallelOps", s.parallelOps)
             .putInt("threads", s.threads)
             .putString("outputTreeUri", s.outputTreeUri)
             .apply()

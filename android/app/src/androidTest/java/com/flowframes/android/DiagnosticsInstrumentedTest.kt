@@ -35,21 +35,27 @@ class DiagnosticsInstrumentedTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val settings = Settings(maxLongSide = 480, quality = AiQuality.FAST)
         val logged = mutableListOf<String>()
-        val report = EngineBenchmark.run(
+        val result = EngineBenchmark.run(
             context = context,
             settings = settings,
-            runs = 1,
             report = { line -> logged += line }
         )
+        val report = result.text
         Log.i(TAG, report)
 
         assertTrue(report.contains("=== FLOWFRAMES ENGINE BENCHMARK ==="))
         assertTrue(report.contains("=== END BENCHMARK ==="))
-        // Static shape resolution must have been applied and logged by the engine.
-        assertTrue("no static shape log:\n$report", logged.any { it.contains("(static)") })
+        // The winning configuration is offered to the user, so it has to exist.
+        assertTrue("no winner reported:\n$report", report.contains("--- winner:") && result.best != null)
         // At least one configuration has to succeed on a real device or emulator.
-        val measured = report.lines().count { it.trim().matches(Regex("^[0-9.]+ ms .+")) }
+        val measured = report.lines().count { line ->
+            line.contains(" ms  ") && line.contains(" ms/MPx ")
+        }
         assertTrue("no configuration succeeded:\n$report", measured > 0)
+        // The sustained pass is what exposes throttling; it must produce a verdict.
+        if (!settings.useNnapi) {
+            assertTrue("no sustained pass:\n$report", report.contains("--- sustained pass"))
+        }
     }
 
     private companion object {
