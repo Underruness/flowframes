@@ -445,6 +445,19 @@ Prévision pour un Snapdragon 8 Elite (Adreno 830) à 540×540, x4 : ~40-70 ms p
 d'essai embarqué donne la vraie valeur). Le build NDK demande r30 (`ndkVersion` dans
 `app/build.gradle.kts`) : le prébuilt ncnn est compilé avec le libc++ de clang 21.
 
+### Version 1.5.1 — fp16, blocages et mode hybride GPU + CPU
+
+Mesure de la 1.5.0 sur Snapdragon 8 Elite (Adreno 830), 540x540 en x4 : **6 fps source avec le GPU en fp32** (contre 1,40 fps en 1.4.0 sur CPU). En revanche, l'arithmétique fp16 bloquait le GPU et figeait le benchmark.
+
+- **fp16 désactivé par défaut.** Le suspect principal est le chemin « cooperative matrix » d'Adreno, réactivé par ncnn 20261020 alors que la version 20260526 l'avait désactivé sur Qualcomm pour des bugs de pilote. Ce chemin a maintenant son propre interrupteur (désactivé), et il ne s'applique qu'avec le fp16. Sans fp16, ncnn garde son comportement par défaut, c'est-à-dire la configuration mesurée à 6 fps.
+- **Plus aucun blocage possible.**
+  - L'auto-test du moteur est limité à 45 s ; après un blocage, la tâche passe sur le CPU.
+  - Chaque configuration du benchmark est limitée à 90 s ; après un blocage du GPU, les tests GPU restants sont ignorés.
+  - Une inférence est limitée à 120 s pendant une tâche : la tâche échoue avec un message clair au lieu de rester figée.
+  - Un moteur bloqué n'est jamais libéré pendant qu'un appel natif tourne.
+- **Mode hybride (« CPU assist »).** Des workers ncnn CPU fp32 puisent dans la même file que les workers GPU. Chaque thread est attaché à un moteur, et la fenêtre d'images en avance est doublée pour que le GPU ne s'arrête pas en attendant une image CPU plus lente. Le journal de la tâche affiche la répartition (« Work split »).
+- **Ordre du benchmark.** Les configurations sûres passent en premier : ONNX, GPU ×1/×2/×3, GPU 4.6, les variantes hybrides (1×4T, 1×6T, 2×3T) et ncnn CPU. Les variantes fp16 passent en dernier. Le débit est mesuré avec toutes les inférences en file en même temps, comme dans une vraie tâche. Le rapport inclut la ligne d'infos Vulkan (pilote, fp16, coopmat).
+
 ## Limites connues
 
 * Sortie **MP4 uniquement** (H.264 ou HEVC), pas de GIF/PNG/MKV.

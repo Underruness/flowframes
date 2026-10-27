@@ -207,6 +207,10 @@ class MainActivity : ComponentActivity() {
                                         engine = if (gpu) EngineKind.AUTO else best.engine,
                                         ncnnModel = best.ncnnModel,
                                         fp16 = best.fp16,
+                                        coopMatrix = best.coopMatrix,
+                                        cpuAssist = gpu && best.cpuWorkers > 0,
+                                        cpuAssistWorkers = if (best.cpuWorkers > 0) best.cpuWorkers else s.cpuAssistWorkers,
+                                        cpuAssistThreads = if (best.cpuWorkers > 0) best.cpuThreads else s.cpuAssistThreads,
                                         // 0 keeps "automatic", so a later CPU change still adapts.
                                         threads = if (gpu || best.totalThreads == RifeEngine.defaultThreads()) 0 else best.totalThreads,
                                         workers = if (gpu && best.workers == 2) 0 else best.workers,

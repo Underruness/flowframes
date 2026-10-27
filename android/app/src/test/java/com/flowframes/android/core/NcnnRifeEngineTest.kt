@@ -114,4 +114,41 @@ class NcnnRifeEngineTest {
         }
         assertTrue(EngineFactory.selfTest(broken, 64, 48) < 15.0)
     }
+
+    @Test
+    fun `hybrid pool of a GPU and a CPU engine gives the same frames`() {
+        assumeTrue(NcnnRifeEngine.isAvailable)
+        val gpuId = if (NcnnRifeEngine.gpuCount() > 0) 0 else -1
+        val gpu = NcnnRifeEngine(modelDir.absolutePath, gpuId = gpuId, cpuThreads = 1)
+        val cpu = NcnnRifeEngine(modelDir.absolutePath, gpuId = -1, cpuThreads = 1)
+        val reference = resource("ens_false/out_0_500000_f32")
+        InferencePool(listOf<FrameEngine>(gpu, gpu, cpu), workers = 3, threadsPerWorker = 1).use { pool ->
+            assertTrue(pool.distinctEngines.size == 2)
+            val f0 = resource("frame0.f32")
+            val f1 = resource("frame1.f32")
+            val outs = Array(9) { FloatArray(w * h * 3) }
+            val futures = ArrayList<Future<*>>()
+            outs.forEach { futures += pool.submit(f0, f1, w, h, 0.5f, it) }
+            futures.forEach { it.get() }
+            outs.forEach { assertTrue(psnr(it, reference) > 55.0) }
+            val stats = pool.engineStats()
+            assertTrue(stats, stats.isNotEmpty())
+        }
+    }
+
+    @Test
+    fun `self-test gives up on an engine that never returns`() {
+        val hung = object : FrameEngine {
+            override val label = "hung"
+            override val threadSafe = true
+            override fun interpolate(frame0: FloatArray, frame1: FloatArray, width: Int, height: Int, t: Float, out: FloatArray) {
+                Thread.sleep(60_000)
+            }
+            override fun close() {}
+        }
+        val start = System.nanoTime()
+        val error = runCatching { EngineFactory.selfTestWithTimeout(hung, 64, 48, timeoutS = 1) }.exceptionOrNull()
+        assertTrue("$error", error is java.util.concurrent.TimeoutException)
+        assertTrue((System.nanoTime() - start) < 10_000_000_000L)
+    }
 }

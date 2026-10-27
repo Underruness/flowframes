@@ -12,7 +12,8 @@ import java.io.File
  * that cost ~43 % of every inference there.
  *
  * Output matches the ONNX Runtime engine on the same RIFE 4.9 weights to ~60 dB PSNR (fp16
- * storage) and ~50 dB with fp16 arithmetic, i.e. invisible differences; the model directory must
+ * storage, fp32 math: the default). fp16 math is opt-in: it hung the benchmark on a Snapdragon
+ * 8 Elite with ncnn 20261020, most likely in its Adreno cooperative-matrix path. The model directory must
  * hold `flownet.param` and `flownet.bin`.
  */
 class NcnnRifeEngine(
@@ -22,7 +23,12 @@ class NcnnRifeEngine(
     val cpuThreads: Int = 4,
     /** Canvas multiple the model needs: 32 for most v4 models, 64 for v4.25/v4.26. */
     val padding: Int = 32,
-    val fp16: Boolean = true
+    val fp16: Boolean = false,
+    /**
+     * Cooperative-matrix kernels (only with [fp16]). ncnn 20261020 re-enabled them on Adreno and
+     * they are the prime suspect of the fp16 hangs seen on a Snapdragon 8 Elite: off by default.
+     */
+    val coopMatrix: Boolean = false
 ) : FrameEngine {
 
     private var handle: Long
@@ -31,14 +37,14 @@ class NcnnRifeEngine(
 
     init {
         check(isAvailable) { "native RIFE library unavailable: $loadError" }
-        handle = nativeCreate(modelDir, gpuId, cpuThreads, padding, fp16)
+        handle = nativeCreate(modelDir, gpuId, cpuThreads, padding, fp16, coopMatrix)
         if (handle == 0L) throw IllegalStateException("ncnn: ${nativeLastError()}")
         deviceName = nativeDeviceName(handle)
     }
 
     override val label: String
         get() = "ncnn ${if (gpuId >= 0) "Vulkan GPU" else "CPU ×$cpuThreads"} · $deviceName · $modelName" +
-            (if (fp16) " · fp16" else " · fp32")
+            (if (fp16) " · fp16 math" else " · fp32 math") + (if (fp16 && coopMatrix) " · coopmat" else "")
 
     override val threadSafe: Boolean get() = true
 
@@ -67,12 +73,18 @@ class NcnnRifeEngine(
         /** Vulkan devices ncnn can use; 0 when the phone has no usable Vulkan driver. */
         fun gpuCount(): Int = if (isAvailable) runCatching { nativeGpuCount() }.getOrDefault(0) else 0
 
+        /** Driver and capability summary of a Vulkan device, for the logs. */
+        fun gpuInfo(index: Int): String = if (isAvailable) runCatching { nativeGpuInfo(index) }.getOrDefault("") else ""
+
         fun gpuName(index: Int): String = if (isAvailable) runCatching { nativeGpuName(index) }.getOrDefault("") else ""
 
         @JvmStatic private external fun nativeGpuCount(): Int
         @JvmStatic private external fun nativeGpuName(index: Int): String
+        @JvmStatic private external fun nativeGpuInfo(index: Int): String
         @JvmStatic private external fun nativeLastError(): String
-        @JvmStatic private external fun nativeCreate(modelDir: String, gpuId: Int, threads: Int, padding: Int, fp16: Boolean): Long
+        @JvmStatic private external fun nativeCreate(
+            modelDir: String, gpuId: Int, threads: Int, padding: Int, fp16: Boolean, coopMatrix: Boolean
+        ): Long
         @JvmStatic private external fun nativeDeviceName(handle: Long): String
         @JvmStatic private external fun nativeInterpolate(
             handle: Long, frame0: FloatArray, frame1: FloatArray, width: Int, height: Int, t: Float, out: FloatArray

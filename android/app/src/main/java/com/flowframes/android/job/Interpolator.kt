@@ -114,10 +114,15 @@ private class StageTiming {
     }
 }
 
+
+/** One interpolation never takes this long on a working engine (CPU 1080p: ~2 s). */
+private const val INFERENCE_TIMEOUT_S = 120L
+
 /**
  * Full FlowFrames pipeline on device:
  * decode (MediaCodec) → RIFE interpolation (ONNX Runtime) → encode (MediaCodec) → mux (MediaMuxer).
  */
+
 class Interpolator(
     private val context: Context,
     private val settings: Settings,
@@ -302,8 +307,11 @@ class Interpolator(
         // Frames are Java-heap FloatArrays, so the window is budgeted against the heap this app was
         // given (largeHeap), never against the phone's RAM: at 1080p one pair is already ~130 MB.
         val heapBudget = Runtime.getRuntime().maxMemory() / 2
+        // Hybrid GPU + CPU: a CPU phase takes several GPU phases' time and the encoder waits for it
+        // in order, so the GPU needs more pairs ahead to stay busy meanwhile.
+        val hybrid = pool.distinctEngines.size > 1
         val capacity = (heapBudget / bytesPerPair.coerceAtLeast(1L)).toInt()
-            .coerceIn(1, maxOf(2, pool.workers))
+            .coerceIn(1, if (hybrid) maxOf(4, pool.workers * 2) else maxOf(2, pool.workers))
         val window = OrderedWindow<PendingPair>(capacity) { pair ->
             written += encodePair(encoder, pair, phases, timing)
             buffers.release(pair.first)
@@ -409,6 +417,7 @@ class Interpolator(
 
         window.drain()
         pool.onInference = null
+        log("Work split: ${pool.engineStats()}")
 
         if (skippedDuplicates > 0) log("Deduplication: $skippedDuplicates duplicate frame(s) skipped")
         if (cuts > 0) log("Scene changes: $cuts cut(s) passed through without interpolation")
@@ -475,7 +484,24 @@ class Interpolator(
 
     private fun awaitInference(future: java.util.concurrent.Future<*>) {
         try {
-            future.get()
+            // Poll so that a cancel is honoured, and give up on a call that never returns (a GPU
+            // driver hang) instead of leaving the job stuck forever.
+            val deadline = System.nanoTime() + INFERENCE_TIMEOUT_S * 1_000_000_000L
+            while (true) {
+                try {
+                    future.get(1, java.util.concurrent.TimeUnit.SECONDS)
+                    break
+                } catch (e: java.util.concurrent.TimeoutException) {
+                    checkCancelled()
+                    if (System.nanoTime() > deadline) {
+                        EngineFactory.markGpuHung()
+                        throw IllegalStateException(
+                            "An inference did not finish in $INFERENCE_TIMEOUT_S s (GPU driver hang?). " +
+                                "Restart the app; the next job will use the CPU, or turn fp16 math off."
+                        )
+                    }
+                }
+            }
         } catch (e: java.util.concurrent.ExecutionException) {
             throw e.cause ?: e
         } catch (e: InterruptedException) {

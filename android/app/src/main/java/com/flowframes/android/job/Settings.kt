@@ -66,10 +66,21 @@ data class Settings(
     val engine: EngineKind = EngineKind.AUTO,
     val ncnnModel: NcnnModel = NcnnModel.V4_9,
     /**
-     * ncnn fp16 arithmetic (GPU, and ARMv8.2 CPU kernels). Measured 50 dB PSNR against fp32 on RIFE
-     * 4.9 — invisible — for up to twice the ALU throughput on mobile GPUs.
+     * ncnn fp16 arithmetic. Off by default: on a Snapdragon 8 Elite it failed (benchmark stuck), the
+     * suspect being ncnn's Adreno cooperative-matrix kernels, now disabled separately ([coopMatrix]).
+     * fp16 *storage* stays on, which is what the 6 fps measurement used.
      */
-    val fp16: Boolean = true
+    val fp16: Boolean = false,
+    /** Cooperative-matrix kernels for fp16 math; experimental on Adreno. */
+    val coopMatrix: Boolean = false,
+    /**
+     * Hybrid mode: while the GPU computes most phases, CPU workers (ncnn, same model) take some
+     * as well. Every worker pulls the next phase from one queue, so the split follows the speeds.
+     */
+    val cpuAssist: Boolean = false,
+    /** CPU workers in hybrid mode, and the threads each one gets. */
+    val cpuAssistWorkers: Int = 1,
+    val cpuAssistThreads: Int = 4
 ) {
     fun planOptions(): com.flowframes.android.core.InterpPlan.Options = com.flowframes.android.core.InterpPlan.Options(
         factor = factor,
@@ -128,7 +139,12 @@ class SettingsStore(context: Context) {
                 .getOrDefault(d.engine),
             ncnnModel = runCatching { NcnnModel.valueOf(prefs.getString("ncnnModel", d.ncnnModel.name)!!) }
                 .getOrDefault(d.ncnnModel),
-            fp16 = prefs.getBoolean("fp16", d.fp16)
+            // New key: 1.5.0 saved fp16=true by default, and that default is what failed.
+            fp16 = prefs.getBoolean("fp16Arith", d.fp16),
+            coopMatrix = prefs.getBoolean("coopMatrix", d.coopMatrix),
+            cpuAssist = prefs.getBoolean("cpuAssist", d.cpuAssist),
+            cpuAssistWorkers = prefs.getInt("cpuAssistWorkers", d.cpuAssistWorkers),
+            cpuAssistThreads = prefs.getInt("cpuAssistThreads", d.cpuAssistThreads)
         )
     }
 
@@ -155,7 +171,11 @@ class SettingsStore(context: Context) {
             .putString("outputTreeUri", s.outputTreeUri)
             .putString("engine", s.engine.name)
             .putString("ncnnModel", s.ncnnModel.name)
-            .putBoolean("fp16", s.fp16)
+            .putBoolean("fp16Arith", s.fp16)
+            .putBoolean("coopMatrix", s.coopMatrix)
+            .putBoolean("cpuAssist", s.cpuAssist)
+            .putInt("cpuAssistWorkers", s.cpuAssistWorkers)
+            .putInt("cpuAssistThreads", s.cpuAssistThreads)
             .apply()
     }
 }

@@ -18,6 +18,9 @@ struct RifeConfig {
     int cpuThreads = 4;     // CPU path, and CPU-side layers of the GPU path
     int padding = 32;       // 32 for most v4 models, 64 for v4.25/v4.26, 128 for v4.25-lite
     bool fp16Arithmetic = false; // GPU: fp16 math in the convolutions (storage is always fp16)
+    // VK_KHR_cooperative_matrix kernels (fp16 only). ncnn 20261020 re-enabled them on Adreno,
+    // where they hang or corrupt on some drivers: off unless explicitly asked for.
+    bool cooperativeMatrix = false;
 };
 
 class RifeCore {
@@ -38,6 +41,8 @@ public:
 
     static int gpuCount();
     static std::string gpuName(int index);
+    // One-line capability summary (driver, fp16, cooperative matrix…) for the job log.
+    static std::string gpuInfo(int index);
 
 private:
     void fillPadded(const float* planar, int width, int height, ncnn::Mat& dst) const;

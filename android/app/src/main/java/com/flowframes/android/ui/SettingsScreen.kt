@@ -155,12 +155,39 @@ fun SettingsScreen(
                 Caption("RIFE 4.9 is the same model as the ONNX engine. 4.6 is about 25% lighter, with slightly different results.")
 
                 SwitchRow(
-                    title = "fp16 arithmetic (ncnn)",
-                    description = "Half-precision math in the network: up to twice as fast on mobile GPUs. Measured " +
-                        "50 dB PSNR against full precision on RIFE 4.9 (invisible); the warp stays in full precision.",
+                    title = "fp16 arithmetic (ncnn, experimental)",
+                    description = "Half-precision math in the network. Off by default: on a Snapdragon 8 Elite it " +
+                        "hung the GPU. Results stay invisible (50 dB) where it works; a hang is now detected " +
+                        "and the job falls back to the CPU.",
                     checked = settings.fp16,
                     onCheckedChange = { v -> onChange { s -> s.copy(fp16 = v) } }
                 )
+                SwitchRow(
+                    title = "Cooperative matrix (experimental)",
+                    description = "ncnn's tensor-core kernels for fp16 math (Adreno 8xx). The likely cause of the " +
+                        "fp16 hang; only used together with fp16 arithmetic.",
+                    checked = settings.coopMatrix,
+                    onCheckedChange = { v -> onChange { s -> s.copy(coopMatrix = v) } }
+                )
+                SwitchRow(
+                    title = "CPU assist (hybrid GPU + CPU)",
+                    description = "CPU workers take interpolations from the same queue as the GPU. Gains when the " +
+                        "CPU is idle; can lose if the phone throttles. Run the benchmark to compare.",
+                    checked = settings.cpuAssist,
+                    onCheckedChange = { v -> onChange { s -> s.copy(cpuAssist = v) } }
+                )
+                if (settings.cpuAssist) {
+                    Text("CPU assist workers", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(1 to 4, 1 to 6, 2 to 3).forEach { (w, t) ->
+                            FilterChip(
+                                selected = settings.cpuAssistWorkers == w && settings.cpuAssistThreads == t,
+                                onClick = { onChange { s -> s.copy(cpuAssistWorkers = w, cpuAssistThreads = t) } },
+                                label = { Text("$w × ${t}T") }
+                            )
+                        }
+                    }
+                }
 
                 Text("Model quality", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

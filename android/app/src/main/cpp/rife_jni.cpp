@@ -50,6 +50,11 @@ Java_com_flowframes_android_core_NcnnRifeEngine_nativeGpuName(JNIEnv* env, jclas
 }
 
 JNIEXPORT jstring JNICALL
+Java_com_flowframes_android_core_NcnnRifeEngine_nativeGpuInfo(JNIEnv* env, jclass, jint index) {
+    return env->NewStringUTF(RifeCore::gpuInfo(index).c_str());
+}
+
+JNIEXPORT jstring JNICALL
 Java_com_flowframes_android_core_NcnnRifeEngine_nativeLastError(JNIEnv* env, jclass) {
     std::lock_guard<std::mutex> lock(g_errorLock);
     return env->NewStringUTF(g_lastError.c_str());
@@ -58,13 +63,14 @@ Java_com_flowframes_android_core_NcnnRifeEngine_nativeLastError(JNIEnv* env, jcl
 JNIEXPORT jlong JNICALL
 Java_com_flowframes_android_core_NcnnRifeEngine_nativeCreate(JNIEnv* env, jclass, jstring modelDir,
                                                               jint gpuId, jint threads, jint padding,
-                                                              jboolean fp16) {
+                                                              jboolean fp16, jboolean coopMatrix) {
     RifeConfig cfg;
     cfg.modelDir = jstr(env, modelDir);
     cfg.gpuId = gpuId;
     cfg.cpuThreads = threads;
     cfg.padding = padding;
     cfg.fp16Arithmetic = fp16 == JNI_TRUE;
+    cfg.cooperativeMatrix = coopMatrix == JNI_TRUE;
     auto* core = new RifeCore();
     std::string error;
     int ret = core->load(cfg, error);

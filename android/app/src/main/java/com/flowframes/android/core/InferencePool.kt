@@ -64,8 +64,34 @@ class InferencePool(
     /** One of the engines, for the rare call that must block the calling thread. */
     val primary: FrameEngine get() = engines[0]
 
-    /** Description of what actually runs, for the job log. */
-    val label: String get() = engines[0].label
+    /** Description of what actually runs, for the job log (several lines' worth in hybrid mode). */
+    val label: String
+        get() = engines.groupingBy { it }.eachCount().entries
+            .joinToString(" + ") { (engine, count) -> "$count× [${engine.label}]" }
+
+    /** Distinct engines, primary first (hybrid mode self-tests each of them). */
+    val distinctEngines: List<FrameEngine> get() = engines.distinct()
+
+    private class EngineCounter {
+        val count = java.util.concurrent.atomic.AtomicLong()
+        val nanos = java.util.concurrent.atomic.AtomicLong()
+    }
+
+    private val counters = java.util.concurrent.ConcurrentHashMap<FrameEngine, EngineCounter>()
+
+    /**
+     * How the work was shared: inferences and mean latency per engine since the pool was built,
+     * e.g. "GPU 412 × 61 ms · CPU 58 × 240 ms".
+     */
+    fun engineStats(): String = distinctEngines.joinToString(" · ") { engine ->
+        val c = counters[engine]
+        val n = c?.count?.get() ?: 0L
+        val ms = if (n > 0) c!!.nanos.get() / 1_000_000.0 / n else 0.0
+        val share = totalInferences().let { if (it > 0) n * 100.0 / it else 0.0 }
+        String.format(java.util.Locale.US, "%s: %d inferences (%.0f%%), %.0f ms each", engine.label, n, share, ms)
+    }
+
+    private fun totalInferences(): Long = counters.values.sumOf { it.count.get() }
 
     /** Called on the worker thread after every interpolation, with its duration in nanoseconds. */
     @Volatile
@@ -116,6 +142,9 @@ class InferencePool(
             val start = System.nanoTime()
             try {
                 engine.interpolate(frame0, frame1, width, height, t, out)
+                val c = counters.getOrPut(engine) { EngineCounter() }
+                c.count.incrementAndGet()
+                c.nanos.addAndGet(System.nanoTime() - start)
             } finally {
                 onInference?.invoke(System.nanoTime() - start)
             }

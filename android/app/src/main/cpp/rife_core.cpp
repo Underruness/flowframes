@@ -1,6 +1,7 @@
 #include "rife_core.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 
@@ -28,6 +29,22 @@ std::string RifeCore::gpuName(int index) {
     ensureGpuInstance();
     if (index < 0 || index >= ncnn::get_gpu_count()) return "";
     return ncnn::get_gpu_info(index).device_name();
+}
+
+std::string RifeCore::gpuInfo(int index) {
+    ensureGpuInstance();
+    if (index < 0 || index >= ncnn::get_gpu_count()) return "";
+    const ncnn::GpuInfo& g = ncnn::get_gpu_info(index);
+    uint32_t api = g.api_version();
+    char buf[512];
+    snprintf(buf, sizeof(buf),
+             "%s · Vulkan %u.%u.%u · driver 0x%x · vendor 0x%x device 0x%x · fp16 storage %d arith %d · "
+             "coopmat %d · subgroup %u · implicit-fp16-bug %d",
+             g.device_name(), VK_VERSION_MAJOR(api), VK_VERSION_MINOR(api), VK_VERSION_PATCH(api),
+             g.driver_version(), g.vendor_id(), g.device_id(), (int)g.support_fp16_storage(),
+             (int)g.support_fp16_arithmetic(), (int)g.support_cooperative_matrix(), g.subgroup_size(),
+             (int)g.bug_implicit_fp16_arithmetic());
+    return buf;
 }
 
 RifeCore::RifeCore() = default;
@@ -70,6 +87,10 @@ int RifeCore::load(const RifeConfig& config, std::string& error) {
         // fp16 arithmetic doubles ALU throughput on Adreno/Mali; the custom warp keeps its
         // sampling coordinates in fp32 so it stays sharp either way.
         opt.use_fp16_arithmetic = cfg.fp16Arithmetic;
+        // fp16 math hung a Snapdragon 8 Elite; the Adreno coopmat kernels (re-enabled by ncnn
+        // 20261020) are the suspect, so they follow their own switch there. Without fp16 math
+        // ncnn's default is kept: it is the configuration measured at 6 fps on that phone.
+        if (cfg.fp16Arithmetic) opt.use_cooperative_matrix = cfg.cooperativeMatrix;
     } else {
         // ARM CPU: ncnn's ARMv8.2 fp16 kernels are opt-in (same switch as the GPU), bf16 is off.
         opt.use_fp16_packed = cfg.fp16Arithmetic;

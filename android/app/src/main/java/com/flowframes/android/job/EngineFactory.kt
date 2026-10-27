@@ -21,7 +21,32 @@ object EngineFactory {
     /** Minimum PSNR of the identity test; a working engine scores 40-60 dB, a broken one < 15. */
     private const val SELF_TEST_MIN_DB = 30.0
 
-    data class Choice(val kind: EngineKind, val workers: Int, val threadsPerWorker: Int)
+    /**
+     * Engine plan. [cpuWorkers] > 0 on a GPU kind is the hybrid mode: that many ncnn CPU workers of
+     * [cpuThreads] threads each join the GPU workers on the same queue.
+     */
+    data class Choice(
+        val kind: EngineKind,
+        val workers: Int,
+        val threadsPerWorker: Int,
+        val cpuWorkers: Int = 0,
+        val cpuThreads: Int = 0
+    )
+
+    /** A GPU call that never returns (driver hang) is given up on after this long. */
+    const val SELF_TEST_TIMEOUT_S = 45L
+
+    /**
+     * Set once a GPU call hung in this process: the queue may stay wedged, so later jobs skip the
+     * GPU until the app restarts instead of hanging again.
+     */
+    @Volatile
+    var gpuHung: Boolean = false
+        private set
+
+    fun markGpuHung() {
+        gpuHung = true
+    }
 
     fun chain(settings: Settings): List<EngineKind> = when {
         // The ensemble ("High quality") weights only exist as an ONNX export.
@@ -38,7 +63,11 @@ object EngineFactory {
         val totalThreads = if (settings.threads > 0) settings.threads else RifeEngine.defaultThreads()
         return when (kind) {
             // Two calls in flight keep the GPU busy while the other one copies frames in and out.
-            EngineKind.NCNN_GPU -> Choice(kind, if (settings.workers > 0) settings.workers else 2, 2)
+            EngineKind.NCNN_GPU -> Choice(
+                kind, if (settings.workers > 0) settings.workers else 2, 2,
+                cpuWorkers = if (settings.cpuAssist) settings.cpuAssistWorkers.coerceIn(1, 4) else 0,
+                cpuThreads = settings.cpuAssistThreads.coerceIn(1, 8)
+            )
             else -> {
                 val workers = (if (settings.workers > 0) settings.workers else InferencePool.defaultWorkers())
                     .coerceAtMost(totalThreads)
@@ -67,10 +96,13 @@ object EngineFactory {
                     log("Engine ${kind.label} unavailable: $reason")
                     null
                 } ?: continue
-            val verdict = runCatching { selfTest(pool.primary, width, height) }
+            val verdict = runCatching {
+                pool.distinctEngines.minOf { engine -> selfTestWithTimeout(engine, width, height) }
+            }
             val db = verdict.getOrNull()
             if (db != null && db >= SELF_TEST_MIN_DB) {
                 log(String.format(Locale.US, "Engine self-test passed (%.1f dB) · %s", db, pool.label))
+                if (kind == EngineKind.NCNN_GPU) log("GPU: ${NcnnRifeEngine.gpuInfo(0)}")
                 if (failures.isNotEmpty()) log("Fell back after: ${failures.joinToString(" · ")}")
                 return pool
             }
@@ -78,7 +110,9 @@ object EngineFactory {
                 ?: String.format(Locale.US, "self-test %.1f dB < %.0f dB (wrong output)", db ?: 0.0, SELF_TEST_MIN_DB)
             failures += "${kind.label}: $reason"
             log("Engine ${kind.label} rejected: $reason")
-            runCatching { pool.close() }
+            if (kind == EngineKind.NCNN_GPU) log("GPU: ${NcnnRifeEngine.gpuInfo(0)}")
+            // A hung engine is still running native code: closing it would crash. Leak it instead.
+            if (verdict.exceptionOrNull() !is java.util.concurrent.TimeoutException) runCatching { pool.close() }
         }
         throw IllegalStateException("No inference engine works on this device: ${failures.joinToString(" · ")}")
     }
@@ -94,10 +128,26 @@ object EngineFactory {
     ): InferencePool = when (choice.kind) {
         EngineKind.NCNN_GPU, EngineKind.AUTO -> {
             check(NcnnRifeEngine.isAvailable) { "native library missing" }
+            check(!gpuHung) { "the GPU hung earlier in this session; restart the app to retry it" }
             check(NcnnRifeEngine.gpuCount() > 0) { "no Vulkan GPU" }
             val dir = ModelStore.prepareNcnn(context, settings.ncnnModel, log)
-            val engine = NcnnRifeEngine(dir, gpuId = 0, cpuThreads = 2, padding = settings.ncnnModel.padding, fp16 = settings.fp16)
-            InferencePool(listOf<FrameEngine>(engine), choice.workers, 0, log)
+            val gpu = NcnnRifeEngine(
+                dir, gpuId = 0, cpuThreads = 2, padding = settings.ncnnModel.padding,
+                fp16 = settings.fp16, coopMatrix = settings.coopMatrix
+            )
+            val helper = if (choice.cpuWorkers > 0) {
+                runCatching {
+                    // fp32 on the CPU: ncnn's ARM fp16 kernels are a separate, unmeasured risk.
+                    NcnnRifeEngine(
+                        dir, gpuId = -1, cpuThreads = choice.cpuThreads,
+                        padding = settings.ncnnModel.padding, fp16 = false
+                    )
+                }.onFailure { log("CPU assist unavailable: ${it.message}") }.getOrNull()
+            } else null
+            val engines = ArrayList<FrameEngine>()
+            repeat(choice.workers) { engines += gpu }
+            if (helper != null) repeat(choice.cpuWorkers) { engines += helper }
+            InferencePool(engines, engines.size, if (helper != null) choice.cpuThreads else 0, log)
         }
         EngineKind.NCNN_CPU -> {
             check(NcnnRifeEngine.isAvailable) { "native library missing" }
@@ -119,6 +169,28 @@ object EngineFactory {
             frameHeight = height,
             log = log
         )
+    }
+
+    /** [selfTest] on a separate thread, so a GPU call that never returns cannot block the job. */
+    fun selfTestWithTimeout(engine: FrameEngine, width: Int, height: Int, timeoutS: Long = SELF_TEST_TIMEOUT_S): Double {
+        val executor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "rife-selftest").apply { isDaemon = true }
+        }
+        try {
+            val future = executor.submit<Double> { selfTest(engine, width, height) }
+            return try {
+                future.get(timeoutS, java.util.concurrent.TimeUnit.SECONDS)
+            } catch (e: java.util.concurrent.TimeoutException) {
+                if (engine is NcnnRifeEngine && engine.gpuId >= 0) markGpuHung()
+                throw java.util.concurrent.TimeoutException(
+                    "no answer after $timeoutS s (${engine.label}): driver hang"
+                )
+            } catch (e: java.util.concurrent.ExecutionException) {
+                throw e.cause ?: e
+            }
+        } finally {
+            executor.shutdown()
+        }
     }
 
     /**

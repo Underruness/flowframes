@@ -29,6 +29,9 @@ object EngineBenchmark {
         val engine: EngineKind,
         val ncnnModel: NcnnModel,
         val fp16: Boolean,
+        val coopMatrix: Boolean,
+        val cpuWorkers: Int,
+        val cpuThreads: Int,
         val workers: Int,
         val threadsPerWorker: Int,
         val useXnnpack: Boolean,
@@ -47,7 +50,10 @@ object EngineBenchmark {
         val workers: Int,
         val threadsPerWorker: Int,
         val model: NcnnModel = NcnnModel.V4_9,
-        val fp16: Boolean = true,
+        val fp16: Boolean = false,
+        val coop: Boolean = false,
+        val cpuWorkers: Int = 0,
+        val cpuThreads: Int = 0,
         val xnnpack: Boolean = false,
         val parallel: Boolean = false,
         val rounds: Int = 3
@@ -57,6 +63,26 @@ object EngineBenchmark {
 
     /** Output closer than this to the ONNX reference counts as correct (same model: 45-60 dB). */
     private const val SAME_MODEL_MIN_DB = 35.0
+
+    /** One configuration (build + warm-up + measure) giving no answer for this long has hung. */
+    private const val CONFIG_TIMEOUT_S = 90L
+
+    /** Runs [block] on its own daemon thread and gives up after [seconds]. */
+    private fun <T> withTimeout(seconds: Long, onTimeout: () -> Unit, block: () -> T): T {
+        val executor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "benchmark-config").apply { isDaemon = true }
+        }
+        try {
+            return executor.submit<T> { block() }.get(seconds, java.util.concurrent.TimeUnit.SECONDS)
+        } catch (e: java.util.concurrent.TimeoutException) {
+            onTimeout()
+            throw e
+        } catch (e: java.util.concurrent.ExecutionException) {
+            throw e.cause ?: e
+        } finally {
+            executor.shutdown()
+        }
+    }
 
     /** Rounds used for the sustained pass, and how many at each end are compared. */
     private const val SUSTAINED_ROUNDS = 8
@@ -83,22 +109,28 @@ object EngineBenchmark {
         // Reference first: its output is what every other configuration is compared with.
         configs += Config("ONNX Runtime $autoWorkers × ${perWorker}T", EngineKind.ORT_CPU, autoWorkers, perWorker)
         if (gpus > 0) {
-            configs += Config("GPU 4.9 fp16 ×1", EngineKind.NCNN_GPU, 1, 0)
-            configs += Config("GPU 4.9 fp16 ×2", EngineKind.NCNN_GPU, 2, 0, rounds = 4)
-            configs += Config("GPU 4.9 fp16 ×3", EngineKind.NCNN_GPU, 3, 0, rounds = 4)
-            configs += Config("GPU 4.9 fp32 math ×2", EngineKind.NCNN_GPU, 2, 0, fp16 = false, rounds = 4)
-            configs += Config("GPU 4.6 fp16 ×2", EngineKind.NCNN_GPU, 2, 0, model = NcnnModel.V4_6, rounds = 4)
+            configs += Config("GPU 4.9 ×1", EngineKind.NCNN_GPU, 1, 0)
+            configs += Config("GPU 4.9 ×2", EngineKind.NCNN_GPU, 2, 0, rounds = 4)
+            configs += Config("GPU 4.9 ×3", EngineKind.NCNN_GPU, 3, 0, rounds = 4)
+            configs += Config("GPU 4.6 ×2", EngineKind.NCNN_GPU, 2, 0, model = NcnnModel.V4_6, rounds = 4)
+            // Hybrid: CPU workers pull phases from the same queue as the GPU ones.
+            configs += Config("GPU ×2 + CPU 1×4T", EngineKind.NCNN_GPU, 2, 0, cpuWorkers = 1, cpuThreads = 4, rounds = 8)
+            configs += Config("GPU ×2 + CPU 1×6T", EngineKind.NCNN_GPU, 2, 0, cpuWorkers = 1, cpuThreads = 6, rounds = 8)
+            configs += Config("GPU ×2 + CPU 2×3T", EngineKind.NCNN_GPU, 2, 0, cpuWorkers = 2, cpuThreads = 3, rounds = 8)
         }
         if (NcnnRifeEngine.isAvailable) {
-            configs += Config("CPU ncnn 4.9 fp16 $autoWorkers × ${perWorker}T", EngineKind.NCNN_CPU, autoWorkers, perWorker)
-            configs += Config("CPU ncnn 4.9 fp32 $autoWorkers × ${perWorker}T", EngineKind.NCNN_CPU, autoWorkers, perWorker, fp16 = false)
-            configs += Config("CPU ncnn 4.9 fp16 1 × ${autoThreads}T", EngineKind.NCNN_CPU, 1, autoThreads)
+            configs += Config("CPU ncnn 4.9 $autoWorkers × ${perWorker}T", EngineKind.NCNN_CPU, autoWorkers, perWorker)
+        }
+        if (gpus > 0) {
+            // Last, and behind a timeout: fp16 math hung this benchmark on a Snapdragon 8 Elite.
+            configs += Config("GPU 4.9 fp16 math ×2", EngineKind.NCNN_GPU, 2, 0, fp16 = true, rounds = 4)
+            configs += Config("GPU 4.9 fp16 math + coopmat ×2", EngineKind.NCNN_GPU, 2, 0, fp16 = true, coop = true, rounds = 4)
         }
 
         report("Benchmark: ${width}x$height canvas (${String.format(Locale.US, "%.2f", megapixels)} MPx), RIFE fast model")
         report(DeviceInfo.headline(context))
         report(
-            if (gpus > 0) "Vulkan GPU: ${NcnnRifeEngine.gpuName(0)}"
+            if (gpus > 0) "Vulkan GPU: ${NcnnRifeEngine.gpuInfo(0)}"
             else if (NcnnRifeEngine.isAvailable) "No usable Vulkan GPU: CPU engines only"
             else "Native engine missing: ONNX Runtime only"
         )
@@ -112,41 +144,57 @@ object EngineBenchmark {
         val fastSettings = settings.copy(quality = AiQuality.FAST)
 
         for ((index, cfg) in configs.withIndex()) {
+            if (cfg.kind == EngineKind.NCNN_GPU && EngineFactory.gpuHung) {
+                report("[${index + 1}/${configs.size}] ${cfg.label} → skipped: the GPU hung earlier")
+                results += Result(cfg, Double.MAX_VALUE, null, "skipped after a GPU hang")
+                continue
+            }
             val result = runCatching {
-                val t0 = System.currentTimeMillis()
-                val pool = makePool(context, fastSettings, cfg, width, height)
-                pool.use { p ->
-                    p.warmUp(width, height)
-                    val initMs = System.currentTimeMillis() - t0
-                    // One output per call in flight, so outputs are never shared between threads.
-                    val outs = Array(cfg.workers) { FloatArray(width * height * 3) }
-                    p.submit(frames0, frames1, width, height, 0.5f, outs[0]).get()
-                    val psnr = reference?.let { ref -> psnr(outs[0], ref) }
-                    if (reference == null && cfg.kind == EngineKind.ORT_CPU) reference = outs[0].copyOf()
-                    val start = System.nanoTime()
-                    var done = 0
-                    repeat(cfg.rounds) {
-                        val futures = ArrayList<Future<*>>(cfg.workers)
-                        for (w in 0 until cfg.workers) {
-                            futures += p.submit(frames0, frames1, width, height, 0.5f, outs[w])
-                        }
+                withTimeout(CONFIG_TIMEOUT_S, onTimeout = {
+                    if (cfg.kind == EngineKind.NCNN_GPU) EngineFactory.markGpuHung()
+                }) {
+                    val t0 = System.currentTimeMillis()
+                    // Not closed on a timeout: a hung native call must not see its engine freed.
+                    val p = makePool(context, fastSettings, cfg, width, height)
+                    try {
+                        p.warmUp(width, height)
+                        val initMs = System.currentTimeMillis() - t0
+                        val total = cfg.workers + cfg.cpuWorkers
+                        val single = FloatArray(width * height * 3)
+                        p.submit(frames0, frames1, width, height, 0.5f, single).get()
+                        val psnr = reference?.let { ref -> psnr(single, ref) }
+                        if (reference == null && cfg.kind == EngineKind.ORT_CPU) reference = single
+                        // Throughput: everything queued at once, as the job does. Outputs are
+                        // shared between calls (only the single run above is checked).
+                        val outs = Array(total) { FloatArray(width * height * 3) }
+                        val count = cfg.rounds * total
+                        val start = System.nanoTime()
+                        val futures = ArrayList<Future<*>>(count)
+                        for (i in 0 until count) futures += p.submit(frames0, frames1, width, height, 0.5f, outs[i % total])
                         futures.forEach { it.get() }
-                        done += cfg.workers
-                    }
-                    val perFrame = (System.nanoTime() - start) / 1_000_000.0 / done
-                    report(
-                        String.format(
-                            Locale.US, "[%d/%d] %s → %.0f ms/inference%s (init %d ms)",
-                            index + 1, configs.size, cfg.label, perFrame,
-                            psnr?.let { String.format(Locale.US, " · %.1f dB vs ONNX", it) } ?: "",
-                            initMs
+                        val perFrame = (System.nanoTime() - start) / 1_000_000.0 / count
+                        val split = if (cfg.cpuWorkers > 0) " · " + p.engineStats() else ""
+                        report(
+                            String.format(
+                                Locale.US, "[%d/%d] %s → %.0f ms/inference%s (init %d ms)%s",
+                                index + 1, configs.size, cfg.label, perFrame,
+                                psnr?.let { String.format(Locale.US, " · %.1f dB vs ONNX", it) } ?: "",
+                                initMs, split
+                            )
                         )
-                    )
-                    Result(cfg, perFrame, psnr, null)
+                        p.close()
+                        Result(cfg, perFrame, psnr, null)
+                    } catch (t: Throwable) {
+                        if (t !is InterruptedException) runCatching { p.close() }
+                        throw t
+                    }
                 }
             }.getOrElse { t ->
-                report("[${index + 1}/${configs.size}] ${cfg.label} → failed: ${t.message ?: t.javaClass.simpleName}")
-                Result(cfg, Double.MAX_VALUE, null, t.message ?: t.javaClass.simpleName)
+                val msg = if (t is java.util.concurrent.TimeoutException) {
+                    "no answer after $CONFIG_TIMEOUT_S s (driver hang), later GPU tests skipped"
+                } else t.message ?: t.javaClass.simpleName
+                report("[${index + 1}/${configs.size}] ${cfg.label} → failed: $msg")
+                Result(cfg, Double.MAX_VALUE, null, msg)
             }
             results += result
         }
@@ -160,10 +208,12 @@ object EngineBenchmark {
         }
         val best = results.filter(::trusted).minByOrNull { it.msPerFrame }
 
-        val sustained = best?.let { winner ->
+        val sustained = best?.takeIf { !(it.config.kind == EngineKind.NCNN_GPU && EngineFactory.gpuHung) }?.let { winner ->
             runCatching {
-                runSustained(context, fastSettings, winner.config, width, height, frames0, frames1,
-                    megapixels, inferencesPerSourceFrame, report)
+                withTimeout(CONFIG_TIMEOUT_S * 2, onTimeout = {}) {
+                    runSustained(context, fastSettings, winner.config, width, height, frames0, frames1,
+                        megapixels, inferencesPerSourceFrame, report)
+                }
             }.getOrElse { t ->
                 report("Sustained pass failed: ${t.message ?: t.javaClass.simpleName}")
                 null
@@ -176,7 +226,7 @@ object EngineBenchmark {
             "Canvas: ${width}x$height (${String.format(Locale.US, "%.2f", megapixels)} MPx) · factor x${settings.factor}"
         )
         DeviceInfo.lines(context).forEach { sb.appendLine(it) }
-        sb.appendLine("Vulkan GPUs: $gpus" + if (gpus > 0) " (${NcnnRifeEngine.gpuName(0)})" else "")
+        sb.appendLine("Vulkan GPUs: $gpus" + if (gpus > 0) " (${NcnnRifeEngine.gpuInfo(0)})" else "")
         sb.appendLine("--- results (ms per interpolated frame, lower is better) ---")
         results.sortedBy { it.msPerFrame }.forEach { r ->
             if (r.error == null) {
@@ -206,7 +256,10 @@ object EngineBenchmark {
                 "Scaled to 540x540: ~${String.format(Locale.US, "%.0f", at540)} ms/frame → " +
                     "~${String.format(Locale.US, "%.1f", 1000.0 / (at540 * inferencesPerSourceFrame))} source fps"
             )
-            sb.appendLine("Current settings: ${settings.engine.label} · ${settings.ncnnModel.label} · fp16 ${settings.fp16}")
+            sb.appendLine(
+                "Current settings: ${settings.engine.label} · ${settings.ncnnModel.label} · fp16 math ${settings.fp16}" +
+                    " · CPU assist " + if (settings.cpuAssist) "${settings.cpuAssistWorkers}×${settings.cpuAssistThreads}T" else "off"
+            )
         }
         if (sustained != null) {
             sb.appendLine("--- sustained pass (${SUSTAINED_ROUNDS} rounds of ${best.config.workers} inferences) ---")
@@ -220,6 +273,9 @@ object EngineBenchmark {
                 engine = it.config.kind,
                 ncnnModel = it.config.model,
                 fp16 = it.config.fp16,
+                coopMatrix = it.config.coop,
+                cpuWorkers = it.config.cpuWorkers,
+                cpuThreads = it.config.cpuThreads,
                 workers = it.config.workers,
                 threadsPerWorker = it.config.threadsPerWorker,
                 useXnnpack = it.config.xnnpack,
@@ -234,10 +290,13 @@ object EngineBenchmark {
         EngineFactory.create(
             context,
             settings.copy(
-                ncnnModel = cfg.model, fp16 = cfg.fp16, useXnnpack = cfg.xnnpack,
+                ncnnModel = cfg.model, fp16 = cfg.fp16, coopMatrix = cfg.coop, useXnnpack = cfg.xnnpack,
                 parallelOps = cfg.parallel, useNnapi = false
             ),
-            EngineFactory.Choice(cfg.kind, cfg.workers, cfg.threadsPerWorker.coerceAtLeast(1)),
+            EngineFactory.Choice(
+                cfg.kind, cfg.workers, cfg.threadsPerWorker.coerceAtLeast(1),
+                cpuWorkers = cfg.cpuWorkers, cpuThreads = cfg.cpuThreads
+            ),
             width, height, log = {}
         )
 
@@ -289,14 +348,16 @@ object EngineBenchmark {
         val before = DeviceInfo.lines(context).firstOrNull { it.startsWith("Thermal") } ?: "Thermal status: unknown"
         makePool(context, settings, cfg, width, height).use { pool ->
             pool.warmUp(width, height)
-            val outs = Array(cfg.workers) { FloatArray(width * height * 3) }
+            val total = cfg.workers + cfg.cpuWorkers
+            val batch = if (cfg.cpuWorkers > 0) total * 4 else total
+            val outs = Array(total) { FloatArray(width * height * 3) }
             val rounds = DoubleArray(SUSTAINED_ROUNDS)
             for (r in 0 until SUSTAINED_ROUNDS) {
                 val start = System.nanoTime()
-                val futures = ArrayList<Future<*>>(cfg.workers)
-                for (w in 0 until cfg.workers) futures += pool.submit(frames0, frames1, width, height, 0.5f, outs[w])
+                val futures = ArrayList<Future<*>>(batch)
+                for (w in 0 until batch) futures += pool.submit(frames0, frames1, width, height, 0.5f, outs[w % total])
                 futures.forEach { it.get() }
-                rounds[r] = (System.nanoTime() - start) / 1_000_000.0 / cfg.workers
+                rounds[r] = (System.nanoTime() - start) / 1_000_000.0 / batch
             }
             val edge = (SUSTAINED_ROUNDS / 3).coerceAtLeast(1)
             val early = rounds.take(edge).average()
@@ -322,7 +383,7 @@ object EngineBenchmark {
                     String.format(
                         Locale.US,
                         "  early %.0f ms/frame · late %.0f ms/frame · drift %+.0f%% over %d inferences",
-                        early, late, drift, SUSTAINED_ROUNDS * cfg.workers
+                        early, late, drift, SUSTAINED_ROUNDS * batch
                     )
                 )
                 appendLine("  $before → $after (after the sustained pass)")
