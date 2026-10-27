@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">FlowFrames</string>
-    <string name="notification_channel_name">Interpolation en cours</string>
-    <string name="notification_channel_desc">Suivi des tâches d\'interpolation vidéo</string>
+    <string name="notification_channel_name">Interpolation running</string>
+    <string name="notification_channel_desc">Progress of video interpolation jobs</string>
     <color name="ic_launcher_background">#14121F</color>
 </resources>

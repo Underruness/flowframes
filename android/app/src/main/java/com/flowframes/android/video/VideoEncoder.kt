@@ -46,7 +46,7 @@ class VideoEncoder(
         var audio = -1
         if (audioFormat != null) {
             audio = runCatching { muxer.addTrack(audioFormat) }.getOrElse {
-                log("Audio non supporté par le muxer, piste ignorée: ${it.message}")
+                log("Audio not supported by the muxer, track skipped: ${it.message}")
                 -1
             }
         }
@@ -54,7 +54,7 @@ class VideoEncoder(
 
         codec = createEncoder(mime, frameRate, bitrate)
         codecStarted = true
-        log("Encodeur: $mime ${width}x$height, ${bitrate / 1000} kb/s, ${spec.label}")
+        log("Encoder: $mime ${width}x$height, ${bitrate / 1000} kb/s, ${spec.label}")
     }
 
     private fun createEncoder(mime: String, frameRate: Int, bitrate: Int): MediaCodec {
@@ -107,7 +107,7 @@ class VideoEncoder(
                 runCatching { c.release() }
             }
         }
-        throw IllegalStateException("Impossible de démarrer l'encodeur $mime: ${lastError?.message}", lastError)
+        throw IllegalStateException("Could not start the $mime encoder: ${lastError?.message}", lastError)
     }
 
     private var lastPtsUs = 0L
@@ -161,7 +161,7 @@ class VideoEncoder(
             }
             drain(false)
         }
-        if (!queued) log("Encodeur: fin de flux non acceptée, clôture directe")
+        if (!queued) log("Encoder: end-of-stream rejected, closing directly")
         drain(true)
         runCatching { codec.stop() }
         codecStarted = false
@@ -181,7 +181,7 @@ class VideoEncoder(
             if (idx >= 0) return idx
             drain(false)
         }
-        throw IllegalStateException("Encodeur bloqué: aucune entrée disponible")
+        throw IllegalStateException("Encoder stalled: no input buffer available")
     }
 
     private fun fillImage(image: android.media.Image, argb: IntArray) {

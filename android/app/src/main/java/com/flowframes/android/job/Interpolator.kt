@@ -6,9 +6,12 @@ import android.media.MediaFormat
 import android.net.Uri
 import android.os.Environment
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
 import androidx.documentfile.provider.DocumentFile
+import com.flowframes.android.core.DeviceInfo
 import com.flowframes.android.core.FrameMath
 import com.flowframes.android.core.InterpPlan
+import com.flowframes.android.core.LatencyStats
 import com.flowframes.android.core.Naming
 import com.flowframes.android.core.RifeEngine
 import com.flowframes.android.video.VideoDecoder
@@ -17,7 +20,7 @@ import com.flowframes.android.video.VideoInfo
 import java.io.File
 import java.util.Locale
 
-class JobCancelledException : Exception("Tâche annulée")
+class JobCancelledException : Exception("Job cancelled")
 
 /**
  * Per-stage wall-clock accounting. Kept in the job log so a slow run can be diagnosed instead of
@@ -28,13 +31,17 @@ private class StageTiming {
     var inferNs = 0L
     var encodeNs = 0L
     var inferCalls = 0
+    val inferenceMs = LatencyStats()
+    val decodeMs = LatencyStats()
 
     fun <T> decode(block: () -> T): T {
         val t = System.nanoTime()
         try {
             return block()
         } finally {
-            decodeNs += System.nanoTime() - t
+            val elapsed = System.nanoTime() - t
+            decodeNs += elapsed
+            decodeMs.add((elapsed / 1_000_000).toInt())
         }
     }
 
@@ -43,8 +50,10 @@ private class StageTiming {
         try {
             return block()
         } finally {
-            inferNs += System.nanoTime() - t
+            val elapsed = System.nanoTime() - t
+            inferNs += elapsed
             inferCalls++
+            inferenceMs.add((elapsed / 1_000_000).toInt())
         }
     }
 
@@ -64,15 +73,18 @@ private class StageTiming {
         return String.format(Locale.US, "%.2f", frames / (totalNs / 1_000_000_000.0))
     }
 
+    fun totalNs(): Long = decodeNs + inferNs + encodeNs
+
     fun summary(frames: Int, outFrames: Int): String {
         fun ms(v: Long) = String.format(Locale.US, "%.0f", v / 1_000_000.0)
         val perInfer = if (inferCalls > 0) inferNs / 1_000_000.0 / inferCalls else 0.0
-        val totalNs = decodeNs + inferNs + encodeNs
-        val fps = if (totalNs > 0) frames / (totalNs / 1_000_000_000.0) else 0.0
-        return "Temps par étage: décodage ${ms(decodeNs)} ms · inférence ${ms(inferNs)} ms " +
-            "(${String.format(Locale.US, "%.0f", perInfer)} ms/image, $inferCalls images) · " +
-            "encodage ${ms(encodeNs)} ms → ${String.format(Locale.US, "%.2f", fps)} img source/s " +
-            "($outFrames images en sortie)"
+        val total = totalNs()
+        val fps = if (total > 0) frames / (total / 1_000_000_000.0) else 0.0
+        val share = if (total > 0) inferNs * 100.0 / total else 0.0
+        return "Stage timing: decode ${ms(decodeNs)} ms · inference ${ms(inferNs)} ms " +
+            "(${String.format(Locale.US, "%.0f", perInfer)} ms/frame, $inferCalls inferences, " +
+            "${String.format(Locale.US, "%.0f", share)}% of wall time) · encode ${ms(encodeNs)} ms " +
+            "→ ${String.format(Locale.US, "%.2f", fps)} source fps ($outFrames output frames)"
     }
 }
 
@@ -92,12 +104,13 @@ class Interpolator(
 
     fun process(inputUri: Uri, displayName: String): Output {
         val info = VideoInfo.read(context, inputUri)
-            ?: throw IllegalStateException("Impossible de lire cette vidéo (format non supporté)")
+            ?: throw IllegalStateException("Cannot read this video (unsupported format)")
 
+        log(DeviceInfo.headline(context))
         log(
-            "Source: ${info.width}x${info.height} · ${fmt(info.fps)} fps · " +
-                "${fmt(info.durationSeconds)} s · ${info.mime.substringAfter('/')}" +
-                if (info.rotation != 0) " · rotation ${info.rotation}°" else ""
+            "Source: ${info.width}x${info.height}" +
+                (if (info.rotation != 0) " (rotation ${info.rotation}°)" else "") +
+                " · ${fmt(info.fps)} fps · ${fmt(info.durationSeconds)} s · ${info.mime.substringAfter('/')}"
         )
 
         val cap = settings.maxLongSide
@@ -106,12 +119,12 @@ class Interpolator(
         val factor = InterpPlan.effectiveFactor(settings.factor, srcFps, settings.maxOutputFps)
         val outFps = srcFps * factor
         if (factor != settings.factor) {
-            log("Facteur réduit de x${settings.factor} à x$factor pour respecter ${settings.maxOutputFps.toInt()} fps max")
+            log("Multiplier reduced from x${settings.factor} to x$factor to stay under ${settings.maxOutputFps.toInt()} fps")
         }
-        log("Traitement en ${targetW}x$targetH, sortie ${fmt(outFps)} fps (x$factor)")
+        log("Processing at ${targetW}x$targetH, output ${fmt(outFps)} fps (x$factor)")
 
         val codec = if (VideoEncoder.isEncoderAvailable(settings.codec.mime)) settings.codec else {
-            log("Encodeur ${settings.codec.label} indisponible sur cet appareil → H.264")
+            log("${settings.codec.label} encoder unavailable on this device → H.264")
             OutputCodec.H264
         }
         val bitrate = VideoEncoder.bitrateFor(targetW, targetH, outFps.toInt(), settings.bitratePreset)
@@ -123,21 +136,26 @@ class Interpolator(
         try {
             val audioFormat = if (settings.keepAudio && info.hasAudio) readAudioFormat(inputUri) else null
             if (settings.keepAudio && info.hasAudio && audioFormat == null) {
-                log("Piste audio illisible, sortie sans audio")
+                log("Audio track unreadable, output will be silent")
             }
 
             val modelPath = ModelStore.prepare(context, settings.quality, log)
             val threads = if (settings.threads > 0) settings.threads else RifeEngine.defaultThreads()
+            if (settings.useNnapi) {
+                log("NNAPI requested: falls back to CPU silently on many drivers, compare with the benchmark")
+            }
 
             RifeEngine(
                 modelPath = modelPath,
                 intraOpThreads = threads,
                 useNnapi = settings.useNnapi,
+                frameWidth = targetW,
+                frameHeight = targetH,
                 log = log
             ).use { engine ->
                 val outPfd = outTarget.fd
                 val inPfd = context.contentResolver.openFileDescriptor(inputUri, "r")
-                    ?: throw IllegalStateException("Impossible d'ouvrir la vidéo source")
+                    ?: throw IllegalStateException("Cannot open the source video")
 
                 var decoder: VideoDecoder? = null
                 var encoder: VideoEncoder? = null
@@ -174,8 +192,8 @@ class Interpolator(
                 }
 
                 success = true
-                onProgress(1f, "Terminé")
-                log("Terminé → ${outTarget.label} ($frames images)")
+                onProgress(1f, "Done")
+                log("Done → ${outTarget.label} ($frames frames)")
                 runCatching { outTarget.fd.close() }
                 return Output(outTarget.uri, outTarget.label, frames, outTarget.path)
             }
@@ -238,9 +256,12 @@ class Interpolator(
         val phases = InterpPlan.phases(factor)
         val planOptions = settings.planOptions()
         val timing = StageTiming()
+        val wallStart = System.nanoTime()
         val expectedFrames = if (info.durationUs > 0) {
             (info.durationSeconds * srcFps).toInt().coerceAtLeast(1)
         } else 1000
+        // A 576x576 RIFE pass costs ~380 ms on current phones, so 30 s in is enough to sample.
+        val heatCheckAfter = 90
 
         while (true) {
             checkCancelled()
@@ -250,6 +271,10 @@ class Interpolator(
                 f
             } ?: break
             decoded++
+
+            if (decoded == heatCheckAfter) {
+                log("Thermal status after $decoded frames: ${thermal()}")
+            }
 
             if (!havePrev) {
                 timing.encode { encoder.encodePlanar(curPlanar, frame.ptsUs) }
@@ -264,7 +289,7 @@ class Interpolator(
                 }
                 onProgress(
                     (0.98f * decoded / expectedFrames.toFloat()).coerceIn(0f, 0.5f),
-                    "Image $decoded/$expectedFrames"
+                    "Frame $decoded/$expectedFrames"
                 )
                 continue
             }
@@ -305,17 +330,17 @@ class Interpolator(
 
             onProgress(
                 (0.98f * decoded / expectedFrames.toFloat()).coerceIn(0f, 0.98f),
-                "Image $decoded/$expectedFrames · $written en sortie · ${timing.rate(decoded)} img/s"
+                "Frame $decoded/$expectedFrames · $written out · ${timing.rate(decoded)} source fps"
             )
         }
 
-        if (skippedDuplicates > 0) log("Dé-duplication: $skippedDuplicates image(s) ignorée(s)")
-        if (cuts > 0) log("Changements de scène: $cuts coupure(s) non interpolée(s)")
+        if (skippedDuplicates > 0) log("Deduplication: $skippedDuplicates duplicate frame(s) skipped")
+        if (cuts > 0) log("Scene changes: $cuts cut(s) passed through without interpolation")
 
         val loopStart = firstPlanar
         if (settings.loop && decoded > 1 && loopStart != null) {
             val avgSpan = if (decoded > 1) (lastPts - firstPts) / (decoded - 1) else 33_333L
-            log("Interpolation de boucle (dernière → première image)")
+            log("Loop interpolation (last → first frame)")
             for (t in phases) {
                 checkCancelled()
                 timing.infer {
@@ -328,10 +353,21 @@ class Interpolator(
             written++
         }
 
-        if (decoded == 0) throw IllegalStateException("Aucune image décodée depuis cette vidéo")
+        if (decoded == 0) throw IllegalStateException("No frame could be decoded from this video")
         log(timing.summary(decoded, written))
+        log(timing.inferenceMs.summary("Inference latency"))
+        log(timing.decodeMs.summary("Decode+convert latency"))
+        val wallMs = (System.nanoTime() - wallStart) / 1_000_000
+        val overheadMs = wallMs - timing.totalNs() / 1_000_000
+        log("Wall time: $wallMs ms (pipeline ${timing.totalNs() / 1_000_000} ms, overhead $overheadMs ms)")
+        log("Thermal status at end: ${thermal()}")
         return written
     }
+
+    private fun thermal(): String = runCatching {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        DeviceInfo.thermalStatus(pm)
+    }.getOrDefault("unknown")
 
     private fun adopt(
         cur: IntArray, curPlanar: FloatArray,
@@ -380,9 +416,9 @@ class Interpolator(
         } catch (c: JobCancelledException) {
             throw c
         } catch (t: Throwable) {
-            log("Copie audio ignorée: ${t.message}")
+            log("Audio copy skipped: ${t.message}")
         }
-        if (copied > 0) log("Audio copié: $copied échantillons")
+        if (copied > 0) log("Audio copied: $copied samples")
     }
 
     private fun createOutput(baseName: String): OutputTarget {
@@ -398,9 +434,9 @@ class Interpolator(
                     if (fd != null) return OutputTarget(doc.uri, name, null, fd)
                     runCatching { doc.delete() }
                 }
-                log("Création du fichier impossible dans le dossier choisi, repli sur le dossier de l'application")
+                log("Could not create the file in the chosen folder, falling back to the app folder")
             } else {
-                log("Dossier de sortie inaccessible, repli sur le dossier de l'application")
+                log("Output folder not writable, falling back to the app folder")
             }
         }
         val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES), "FlowFrames").apply { mkdirs() }

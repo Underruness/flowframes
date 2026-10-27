@@ -73,6 +73,8 @@ fun MainScreen(
     onCancel: () -> Unit,
     onOpenSettings: () -> Unit,
     onClearFinished: () -> Unit,
+    onCopyLogs: () -> Unit,
+    onShareLogs: () -> Unit,
     onRemove: (String) -> Unit
 ) {
     Scaffold(
@@ -82,7 +84,7 @@ fun MainScreen(
                     Column {
                         Text("FlowFrames", fontWeight = FontWeight.Bold)
                         Text(
-                            "Interpolation RIFE 4.9 · sur l'appareil",
+                            "RIFE 4.9 · on-device interpolation",
                             fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -90,10 +92,10 @@ fun MainScreen(
                 },
                 actions = {
                     IconButton(onClick = onClearFinished) {
-                        Icon(Icons.Filled.DeleteSweep, contentDescription = "Vider la liste terminée")
+                        Icon(Icons.Filled.DeleteSweep, contentDescription = "Clear finished jobs")
                     }
                     IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Filled.Settings, contentDescription = "Réglages")
+                        Icon(Icons.Filled.Settings, contentDescription = "Settings")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -116,7 +118,7 @@ fun MainScreen(
                     ) {
                         Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Ajouter")
+                        Text("Add videos")
                     }
                     Button(
                         onClick = if (running) onCancel else onStart,
@@ -129,7 +131,7 @@ fun MainScreen(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(Modifier.width(6.dp))
-                        Text(if (running) "Annuler" else "Démarrer")
+                        Text(if (running) "Cancel" else "Start")
                     }
                 }
             }
@@ -154,7 +156,7 @@ fun MainScreen(
                     }
                 }
             }
-            LogPanel(logs)
+            LogPanel(logs, onCopyLogs = onCopyLogs, onShareLogs = onShareLogs)
         }
     }
 }
@@ -162,7 +164,7 @@ fun MainScreen(
 @Composable
 private fun SettingsSummary(settings: Settings) {
     val res = when (settings.maxLongSide) {
-        0 -> "résolution source"
+        0 -> "source resolution"
         854 -> "480p"
         1280 -> "720p"
         1920 -> "1080p"
@@ -188,7 +190,7 @@ private fun SettingsSummary(settings: Settings) {
             Text(res, fontSize = 13.sp)
             Text("·", color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(
-                if (settings.quality == com.flowframes.android.job.AiQuality.HIGH) "haute qualité" else "rapide",
+                if (settings.quality == com.flowframes.android.job.AiQuality.HIGH) "high quality" else "fast",
                 fontSize = 13.sp
             )
             Text("·", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -213,12 +215,11 @@ private fun EmptyState(onAdd: () -> Unit) {
             tint = Accent
         )
         Spacer(Modifier.height(16.dp))
-        Text("Aucune vidéo en file", fontWeight = FontWeight.Bold)
+        Text("No video in the queue", fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         Text(
-            "Ajoutez une ou plusieurs vidéos, choisissez un facteur d'interpolation " +
-                "puis lancez le traitement. RIFE génère les images intermédiaires sur l'appareil, " +
-                "sans internet et sans PC.",
+            "Add one or more videos, pick an interpolation multiplier and start the job. " +
+                "RIFE generates the in-between frames on the device: no computer, no internet.",
             fontSize = 13.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -226,7 +227,7 @@ private fun EmptyState(onAdd: () -> Unit) {
         Button(onClick = onAdd) {
             Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(6.dp))
-            Text("Choisir des vidéos")
+            Text("Choose videos")
         }
     }
 }
@@ -241,11 +242,11 @@ private fun JobCard(job: JobItem, onRemove: () -> Unit, canRemove: Boolean) {
         JobStatus.CANCELLED -> Warn
     }
     val statusLabel = when (job.status) {
-        JobStatus.QUEUED -> "en attente"
-        JobStatus.RUNNING -> "en cours"
-        JobStatus.DONE -> "terminé"
-        JobStatus.FAILED -> "échec"
-        JobStatus.CANCELLED -> "annulé"
+        JobStatus.QUEUED -> "queued"
+        JobStatus.RUNNING -> "running"
+        JobStatus.DONE -> "done"
+        JobStatus.FAILED -> "failed"
+        JobStatus.CANCELLED -> "cancelled"
     }
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -267,7 +268,7 @@ private fun JobCard(job: JobItem, onRemove: () -> Unit, canRemove: Boolean) {
                             append(String.format(Locale.US, "%.2f", info.fps).trimEnd('0').trimEnd('.'))
                             append(" fps · ")
                             append(formatDuration(info.durationSeconds))
-                        } ?: append("métadonnées indisponibles")
+                        } ?: append("metadata unavailable")
                     }
                     Text(meta, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -276,7 +277,7 @@ private fun JobCard(job: JobItem, onRemove: () -> Unit, canRemove: Boolean) {
                     IconButton(onClick = onRemove, modifier = Modifier.size(32.dp)) {
                         Icon(
                             Icons.Filled.Close,
-                            contentDescription = "Retirer",
+                            contentDescription = "Remove",
                             modifier = Modifier.size(16.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -317,7 +318,7 @@ private fun JobCard(job: JobItem, onRemove: () -> Unit, canRemove: Boolean) {
 }
 
 @Composable
-private fun LogPanel(logs: List<String>) {
+private fun LogPanel(logs: List<String>, onCopyLogs: () -> Unit, onShareLogs: () -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     LaunchedEffect(logs.size, expanded) {
@@ -329,12 +330,18 @@ private fun LogPanel(logs: List<String>) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                    .padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Journal", fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                Text("Log", fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                TextButton(onClick = onCopyLogs, enabled = logs.isNotEmpty()) {
+                    Text("Copy", fontSize = 12.sp)
+                }
+                TextButton(onClick = onShareLogs, enabled = logs.isNotEmpty()) {
+                    Text("Share", fontSize = 12.sp)
+                }
                 TextButton(onClick = { expanded = !expanded }) {
-                    Text(if (expanded) "Réduire" else "Afficher", fontSize = 12.sp)
+                    Text(if (expanded) "Hide" else "Show", fontSize = 12.sp)
                 }
             }
             if (expanded) {
@@ -346,7 +353,7 @@ private fun LogPanel(logs: List<String>) {
                 ) {
                     if (logs.isEmpty()) {
                         Text(
-                            "Aucun évènement",
+                            "No events yet",
                             fontSize = 11.sp,
                             modifier = Modifier.padding(12.dp),
                             color = MaterialTheme.colorScheme.onSurfaceVariant

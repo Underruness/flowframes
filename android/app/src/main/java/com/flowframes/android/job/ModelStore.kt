@@ -21,7 +21,7 @@ object ModelStore {
 
         val upToDate = target.isFile && (expectedSize == null || target.length() == expectedSize)
         if (!upToDate) {
-            log("Extraction du modèle ${if (quality == AiQuality.HIGH) "haute qualité" else "rapide"}…")
+            log("Extracting the ${if (quality == AiQuality.HIGH) "high quality" else "fast"} model…")
             context.assets.open(name).use { input ->
                 target.outputStream().use { output -> input.copyTo(output, 1 shl 16) }
             }

@@ -15,6 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -47,15 +48,19 @@ fun SettingsScreen(
     onChange: ((Settings) -> Settings) -> Unit,
     onBack: () -> Unit,
     onPickOutputFolder: () -> Unit,
-    onResetOutputFolder: () -> Unit
+    onResetOutputFolder: () -> Unit,
+    onRunBenchmark: () -> Unit,
+    benchmarkRunning: Boolean,
+    onCopyLogs: () -> Unit,
+    onShareLogs: () -> Unit
 ) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Réglages", fontWeight = FontWeight.Bold) },
+                title = { Text("Settings", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.Filled.ArrowBack, contentDescription = "Retour")
+                        Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
@@ -71,7 +76,7 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Section("Interpolation") {
-                Text("Facteur", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Text("Multiplier", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(2, 3, 4, 6, 8).forEach { f ->
                         FilterChip(
@@ -81,10 +86,10 @@ fun SettingsScreen(
                         )
                     }
                 }
-                Caption("Chaque facteur ajoute ${settings.factor - 1} image(s) interpolée(s) entre deux images source.")
+                Caption("Each step adds ${settings.factor - 1} interpolated frame(s) between two source frames.")
 
                 Spacer(Modifier.height(4.dp))
-                Text("Résolution de traitement", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Text("Processing resolution", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(854 to "480p", 1280 to "720p", 1920 to "1080p").forEach { (v, label) ->
                         FilterChip(
@@ -104,36 +109,36 @@ fun SettingsScreen(
                     }
                 }
                 Caption(
-                    "Les grandes résolutions sont plus belles mais beaucoup plus lentes et gourmandes en RAM. " +
-                        "720p est un bon compromis sur mobile."
+                    "Higher resolutions look better but cost time and RAM roughly with the pixel count. " +
+                        "Each frame costs about (width × height) / 330 000 × the per-frame time shown by the benchmark."
                 )
             }
 
-            Section("Intelligence artificielle") {
-                Text("Qualité du modèle", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            Section("AI engine") {
+                Text("Model quality", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(
                         selected = settings.quality == AiQuality.FAST,
                         onClick = { onChange { s -> s.copy(quality = AiQuality.FAST) } },
-                        label = { Text("Rapide") }
+                        label = { Text("Fast") }
                     )
                     FilterChip(
                         selected = settings.quality == AiQuality.HIGH,
                         onClick = { onChange { s -> s.copy(quality = AiQuality.HIGH) } },
-                        label = { Text("Haute qualité") }
+                        label = { Text("High quality") }
                     )
                 }
-                Caption("« Haute qualité » active le mode ensemble de RIFE : moins d'artefacts, environ deux fois plus lent.")
+                Caption("\"High quality\" runs RIFE in ensemble mode: fewer artefacts, roughly twice as slow.")
 
                 SwitchRow(
-                    title = "Accélération NNAPI",
-                    description = "Utilise le processeur neuronal de l'appareil quand il est disponible (résultats variables selon le modèle).",
+                    title = "NNAPI acceleration",
+                    description = "Uses the neural processor when the driver supports it. Many devices fall back to the CPU silently, so measure before trusting it.",
                     checked = settings.useNnapi,
                     onCheckedChange = { v -> onChange { s -> s.copy(useNnapi = v) } }
                 )
 
                 Text(
-                    "Threads CPU : " + if (settings.threads == 0) "automatique" else settings.threads.toString(),
+                    "CPU threads: " + if (settings.threads == 0) "automatic" else settings.threads.toString(),
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 13.sp
                 )
@@ -143,9 +148,10 @@ fun SettingsScreen(
                     valueRange = 0f..8f,
                     steps = 7
                 )
+                Caption("More threads is not always faster: on big.LITTLE chips the small cores can slow the matrix kernels down.")
             }
 
-            Section("Vidéo de sortie") {
+            Section("Output video") {
                 Text("Codec", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutputCodec.entries.forEach { codec ->
@@ -157,9 +163,9 @@ fun SettingsScreen(
                     }
                 }
 
-                Text("Débit", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Text("Bitrate", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("Léger", "Équilibré", "Élevé").forEachIndexed { index, label ->
+                    listOf("Small", "Balanced", "High").forEachIndexed { index, label ->
                         FilterChip(
                             selected = settings.bitratePreset == index,
                             onClick = { onChange { s -> s.copy(bitratePreset = index) } },
@@ -169,14 +175,14 @@ fun SettingsScreen(
                 }
 
                 SwitchRow(
-                    title = "Conserver l'audio",
-                    description = "La piste audio d'origine est copiée telle quelle, sans réencodage.",
+                    title = "Keep audio",
+                    description = "The original audio track is copied as-is, without re-encoding.",
                     checked = settings.keepAudio,
                     onCheckedChange = { v -> onChange { s -> s.copy(keepAudio = v) } }
                 )
 
                 Spacer(Modifier.height(4.dp))
-                Text("Modèle de nom", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Text("Filename pattern", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 OutlinedTextField(
                     value = settings.namePattern,
                     onValueChange = { v -> onChange { s -> s.copy(namePattern = v) } },
@@ -184,7 +190,7 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth(),
                     textStyle = MaterialTheme.typography.bodySmall
                 )
-                Caption("Variables : {name} {factor} {fps} {codec} {date}")
+                Caption("Variables: {name} {factor} {fps} {codec} {date}")
                 val preview = Naming.build(
                     settings.namePattern,
                     "clip.mp4",
@@ -192,37 +198,37 @@ fun SettingsScreen(
                     (30.0 * settings.factor),
                     settings.codec.label
                 )
-                Caption("Aperçu : $preview")
+                Caption("Preview: $preview")
 
                 Spacer(Modifier.height(4.dp))
-                Text("Dossier de sortie", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Text("Output folder", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        settings.outputTreeUri?.let { "Dossier personnalisé" }
-                            ?: "Dossier de l'application (aucune permission requise)",
+                        settings.outputTreeUri?.let { "Custom folder" }
+                            ?: "App folder (no permission required)",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.weight(1f)
                     )
-                    OutlinedButton(onClick = onPickOutputFolder) { Text("Choisir", fontSize = 12.sp) }
+                    OutlinedButton(onClick = onPickOutputFolder) { Text("Choose", fontSize = 12.sp) }
                 }
                 if (settings.outputTreeUri != null) {
                     Row {
-                        OutlinedButton(onClick = onResetOutputFolder) { Text("Réinitialiser", fontSize = 12.sp) }
+                        OutlinedButton(onClick = onResetOutputFolder) { Text("Reset", fontSize = 12.sp) }
                     }
                 }
             }
 
-            Section("Animation 2D et finitions") {
+            Section("2D animation and finishing") {
                 SwitchRow(
-                    title = "Dé-duplication des images",
-                    description = "Ignore les images identiques. À activer pour l'animation 2D, à laisser désactivé pour de la vidéo réelle.",
+                    title = "Frame deduplication",
+                    description = "Skips identical frames. Enable for 2D animation, leave off for live-action video.",
                     checked = settings.dedupe,
                     onCheckedChange = { v -> onChange { s -> s.copy(dedupe = v) } }
                 )
                 if (settings.dedupe) {
                     Text(
-                        "Seuil : " + String.format(Locale.US, "%.3f", settings.dedupeThreshold),
+                        "Threshold: " + String.format(Locale.US, "%.3f", settings.dedupeThreshold),
                         fontSize = 13.sp
                     )
                     Slider(
@@ -233,14 +239,14 @@ fun SettingsScreen(
                 }
 
                 SwitchRow(
-                    title = "Corriger les changements de scène",
-                    description = "Évite de créer une image de transition (morphing) au milieu d'un changement de plan.",
+                    title = "Fix scene changes",
+                    description = "Avoids generating a morphed transition frame in the middle of a cut.",
                     checked = settings.fixSceneChanges,
                     onCheckedChange = { v -> onChange { s -> s.copy(fixSceneChanges = v) } }
                 )
                 if (settings.fixSceneChanges) {
                     Text(
-                        "Sensibilité : " + String.format(Locale.US, "%.2f", settings.sceneThreshold),
+                        "Sensitivity: " + String.format(Locale.US, "%.2f", settings.sceneThreshold),
                         fontSize = 13.sp
                     )
                     Slider(
@@ -251,15 +257,15 @@ fun SettingsScreen(
                 }
 
                 SwitchRow(
-                    title = "Boucle parfaite",
-                    description = "Interpole aussi de la dernière vers la première image pour les vidéos en boucle.",
+                    title = "Perfect loop",
+                    description = "Also interpolates from the last frame back to the first, for looping videos.",
                     checked = settings.loop,
                     onCheckedChange = { v -> onChange { s -> s.copy(loop = v) } }
                 )
 
                 Text(
-                    "Limite de FPS en sortie : " +
-                        if (settings.maxOutputFps <= 0.0) "aucune"
+                    "Output FPS limit: " +
+                        if (settings.maxOutputFps <= 0.0) "none"
                         else String.format(Locale.US, "%.0f fps", settings.maxOutputFps),
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 13.sp
@@ -272,17 +278,43 @@ fun SettingsScreen(
                 )
             }
 
-            Section("À propos") {
+            Section("Diagnostics") {
                 Text(
-                    "FlowFrames Android 1.0.0 — réimplémentation du pipeline de FlowFrames (Windows) " +
-                        "pour Android : décodage MediaCodec, interpolation RIFE 4.9 via ONNX Runtime, " +
-                        "encodage matériel et muxage MP4.",
+                    "The engine benchmark loads the model several ways (execution provider, thread count, " +
+                        "static shapes) and reports the real cost per frame on this device. It takes about " +
+                        "15 seconds and writes the result to the log.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(onClick = onRunBenchmark, enabled = !benchmarkRunning) {
+                        Text(if (benchmarkRunning) "Benchmark running…" else "Run engine benchmark", fontSize = 12.sp)
+                    }
+                    if (benchmarkRunning) {
+                        CircularProgressIndicator(modifier = Modifier.width(18.dp).height(18.dp), strokeWidth = 2.dp)
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(onClick = onCopyLogs) { Text("Copy logs", fontSize = 12.sp) }
+                    OutlinedButton(onClick = onShareLogs) { Text("Share logs", fontSize = 12.sp) }
+                }
+                Caption(
+                    "Logs include device model, core count, thermal status, execution provider, " +
+                        "per-stage timings and inference latency percentiles."
+                )
+            }
+
+            Section("About") {
+                Text(
+                    "FlowFrames Android 1.2.0 — a rewrite of the FlowFrames (Windows) pipeline for Android: " +
+                        "MediaCodec decoding, RIFE 4.9 interpolation through ONNX Runtime, hardware encoding " +
+                        "and MP4 muxing.",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "Modèles RIFE 4.9 (MIT) · exécution 100 % locale, aucune donnée envoyée.",
+                    "RIFE 4.9 models (MIT) · everything runs locally, nothing is uploaded.",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

@@ -27,6 +27,8 @@ class JobStore {
     val jobs = MutableStateFlow<List<JobItem>>(emptyList())
     val logs = MutableStateFlow<List<String>>(emptyList())
     val running = MutableStateFlow(false)
+    val benchmark = MutableStateFlow<String?>(null)
+    val benchmarkRunning = MutableStateFlow(false)
 
     @Volatile
     var cancelRequested: Boolean = false
@@ -38,8 +40,16 @@ class JobStore {
     fun addLog(line: String) {
         val stamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
         val next = logs.value + "[$stamp] $line"
-        logs.value = if (next.size > 300) next.takeLast(300) else next
+        logs.value = if (next.size > 1000) next.takeLast(1000) else next
     }
+
+    /** Adds a multi-line block (a benchmark report, a stack trace) one line at a time. */
+    fun addLines(text: String) {
+        text.lines().forEach { addLog(it) }
+    }
+
+    /** Full log as plain text, for the clipboard and the share sheet. */
+    fun logText(): String = logs.value.joinToString("\n")
 
     fun update(id: String, transform: (JobItem) -> JobItem) {
         jobs.value = jobs.value.map { if (it.id == id) transform(it) else it }
@@ -56,6 +66,10 @@ class JobStore {
     fun clearAll() {
         jobs.value = emptyList()
         logs.value = emptyList()
+    }
+
+    fun setBenchmark(text: String?) {
+        benchmark.value = text
     }
 
     fun requestCancel() {

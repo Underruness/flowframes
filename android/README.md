@@ -121,7 +121,7 @@ Sortie : `app/build/outputs/apk/release/app-release.apk`.
 ### Tests
 
 ```bash
-./gradlew testDebugUnitTest        # 35 tests JVM (moteur RIFE vs référence Python, YUV, plan, nommage)
+./gradlew testDebugUnitTest        # 48 tests JVM (moteur RIFE vs référence Python, YUV, plan, nommage)
 ./gradlew connectedDebugAndroidTest # tests instrumentés (pipeline complet + UI) sur appareil/émulateur
 ```
 
@@ -146,7 +146,7 @@ adb shell am instrument -w \
 | Vérification | Résultat |
 |---|---|
 | Compilation (debug + release, lint vital) | ✅ |
-| 35 tests unitaires JVM | ✅ |
+| 48 tests unitaires JVM | ✅ |
 | Sortie du moteur RIFE identique à la référence Python (deux modèles, 3 phases) | ✅ |
 | APK signé, installé et démarré sur Android 12 (émulateur x86_64) | ✅ |
 | Encodage MP4 de bout en bout par `VideoEncoder` (images réelles) | ✅ |
@@ -215,10 +215,57 @@ Pistes écartées, avec la raison :
 * **Quantification INT8** : rejetée par la mesure. `tools/quantize_rife.py` quantifie le modèle en
   QDQ et compare au FP32 ; le PSNR tombe à 12,6 dB au pire des cas pour un seuil fixé à 33 dB.
   RIFE (GridNet, nombreuses concaténations) ne supporte pas l'int8 sans entraînement spécifique.
-* **Formes fixes pour XNNPACK** : `addFreeDimensionOverride` n'est pas exposé par ONNX Runtime
-  1.19.2 côté Java (`javap` sur l'AAR le confirme).
 * **NNAPI** : l'option existe dans les réglages, mais NNAPI est déprécié depuis Android 15 et son
   gain est très variable selon le pilote du constructeur. Ce n'est pas activé par défaut.
+
+### Version 1.2.0 — mesure sur appareil et formes figées
+
+La 1.1.0 restait lente sur un Snapdragon 8 Elite : 379 ms d'inférence par image à 576×576, avec
+97 % du temps total dans le modèle (décodage 2,8 s et encodage 12 s pour 8 minutes de calcul).
+Le profil par opérateur d'ONNX Runtime (`tools/profile_ops.py`) explique où part ce temps :
+
+| Opérateur | Part du temps | Nœuds |
+|---|---|---|
+| `GridSample` (warping RIFE) | ~43 % | 14 |
+| `Conv` | ~25 % | 42 |
+| `ConvTranspose`, `Resize`, `Transpose`, `Slice`, `Concat` | ~25 % | 99 |
+| Reorder (conversions de layout) | ~5 % | 264 événements |
+
+`GridSample` n'a pas d'implémentation rapide sur CPU et n'existe pas dans XNNPACK : c'est le
+plafond structurel de cette architecture de modèle, et aucune option de compilation ne le
+contourne. Ce qui a donc été corrigé :
+
+* **Dimensions figées.** `OrtSession.SessionOptions.setSymbolicDimensionValue("height"|"width", n)`
+  existe bien dans l'API Java 1.19.2 (contrairement à ce qu'indiquait la version précédente de ce
+  fichier : c'est `addFreeDimensionOverride` qui manque). Le moteur reçoit désormais la taille de
+  traitement à sa construction et fige `height`/`width`. Deux tests vérifient que la sortie reste
+  **bit-identique** au graphe dynamique, y compris à une résolution non multiple de 32.
+* **Graphe plié.** Avec des formes connues, ORT replie les ~130 nœuds de calcul de formes :
+  412 → 255 nœuds, soit −15 % de temps par image mesurés ici (`tools/compare_variants.py`),
+  sortie identique au bit près.
+* **Banc d'essai embarqué.** Les réglages exposent « Run engine benchmark » : cinq configurations
+  (XNNPACK, CPU seul, NNAPI, 4 ou 8 threads, formes figées ou dynamiques) sont chronométrées sur
+  l'appareil, avec le profil par opérateur de la meilleure, et le rapport est copiable. C'est la
+  seule façon de savoir ce qui gagne réellement sur un SoC donné.
+* **Logs détaillés.** Chaque tâche journalise l'appareil (modèle, cœur, RAM, statut thermique),
+  le fournisseur d'exécution, les formes, le temps par étage, la répartition en pourcentage et les
+  percentiles de latence d'inférence (min/médiane/p95/max), avec boutons « Copy » et « Share ».
+  Les percentiles révèlent le throttling qu'une moyenne masque.
+* **Interface en anglais**, y compris les messages du pipeline, la notification et les erreurs.
+
+Pistes examinées et écartées, chiffres à l'appui :
+
+* **FP16 / INT8** : la quantification INT8 tombe à 12,6 dB de PSNR, inutilisable. Le FP16 n'a pas
+  d'intérêt démontrable ici : ORT n'en tire parti que si XNNPACK prend le nœud, et `GridSample`
+  reste de toute façon sur le CPU.
+* **ONNX Runtime 1.22** : mesuré ~12 % plus rapide que la version utilisée sur les mêmes modèles
+  en Python x86, mais aucune preuve sur ARM ; le gain n'est pas garanti et la version est restée
+  en 1.19.2.
+* **Réécriture de `GridSample` en `GatherND`** : quatre collectes par pixel au lieu d'un warp
+  vectorisé, plus de trafic mémoire — pas de raison d'être plus rapide, non implémenté.
+
+Le vrai levier restant est le modèle : à qualité comparable, un réseau plus léger (RIFE-lite)
+coûterait plusieurs fois moins cher. C'est un changement de modèle, pas d'optimisation.
 
 ## Limites connues
 

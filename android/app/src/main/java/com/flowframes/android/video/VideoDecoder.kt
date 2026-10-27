@@ -49,7 +49,7 @@ class VideoDecoder(
                 break
             }
         }
-        require(idx >= 0 && format != null) { "Aucune piste vidéo trouvée" }
+        require(idx >= 0 && format != null) { "No video track found" }
         trackIndex = idx
         extractor.selectTrack(idx)
         val mime = format.getString(MediaFormat.KEY_MIME)!!
@@ -59,7 +59,7 @@ class VideoDecoder(
         started = true
         codedWidth = format.getInteger(MediaFormat.KEY_WIDTH)
         codedHeight = format.getInteger(MediaFormat.KEY_HEIGHT)
-        log("Décodeur: $mime ${codedWidth}x$codedHeight (rotation $rotation°, couleur ${spec.label})")
+        log("Decoder: $mime ${codedWidth}x$codedHeight (rotation $rotation°, colour ${spec.label})")
     }
 
     /** Decodes the next frame into [out] (targetWidth x targetHeight ARGB). */
@@ -104,7 +104,7 @@ class VideoDecoder(
                 }
             }
         }
-        log("Décodeur: limite d'itérations atteinte")
+        log("Decoder: iteration limit reached")
         return null
     }
 

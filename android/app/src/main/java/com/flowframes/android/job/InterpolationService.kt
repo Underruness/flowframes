@@ -44,7 +44,7 @@ class InterpolationService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_CANCEL -> {
-                AppGraph.jobs.addLog("Annulation demandée")
+                AppGraph.jobs.addLog("Cancel requested")
                 AppGraph.jobs.requestCancel()
             }
 
@@ -56,7 +56,7 @@ class InterpolationService : Service() {
     private fun startProcessing() {
         if (worker?.isActive == true) return
         AppGraph.jobs.resetCancel()
-        startForegroundCompat(buildNotification("Préparation…", 0, true))
+        startForegroundCompat(buildNotification("Preparing…", 0, true))
         acquireWakeLock()
         worker = scope.launch { runQueue() }
     }
@@ -90,7 +90,7 @@ class InterpolationService : Service() {
                         it.copy(
                             status = JobStatus.DONE,
                             progress = 1f,
-                            detail = "${result.frames} images → ${result.label}",
+                            detail = "${result.frames} frames → ${result.label}",
                             outputName = result.label,
                             outputLabel = result.path ?: result.uri.toString()
                         )
@@ -98,20 +98,20 @@ class InterpolationService : Service() {
                     completed++
                 } catch (cancelled: JobCancelledException) {
                     AppGraph.jobs.update(next.id) {
-                        it.copy(status = JobStatus.CANCELLED, detail = "Annulé", progress = 0f)
+                        it.copy(status = JobStatus.CANCELLED, detail = "Cancelled", progress = 0f)
                     }
-                    AppGraph.jobs.addLog("■ ${next.displayName} annulé")
+                    AppGraph.jobs.addLog("■ ${next.displayName} cancelled")
                     break
                 } catch (oom: OutOfMemoryError) {
-                    val message = "Mémoire insuffisante — réduisez la résolution de traitement (par exemple 720p ou 480p) dans les réglages"
+                    val message = "Out of memory — lower the processing resolution (for example 720p or 480p) in Settings"
                     AppGraph.jobs.update(next.id) {
-                        it.copy(status = JobStatus.FAILED, error = message, detail = "Échec")
+                        it.copy(status = JobStatus.FAILED, error = message, detail = "Failed")
                     }
                     AppGraph.jobs.addLog("✖ ${next.displayName}: $message")
                 } catch (t: Throwable) {
                     val message = t.message ?: t.javaClass.simpleName
                     AppGraph.jobs.update(next.id) {
-                        it.copy(status = JobStatus.FAILED, error = message, detail = "Échec")
+                        it.copy(status = JobStatus.FAILED, error = message, detail = "Failed")
                     }
                     AppGraph.jobs.addLog("✖ ${next.displayName}: $message")
                 }
@@ -124,7 +124,7 @@ class InterpolationService : Service() {
                 stopSelf()
             }
             if (completed > 0) {
-                AppGraph.jobs.addLog("File terminée: $completed vidéo(s) traitée(s)")
+                AppGraph.jobs.addLog("Queue finished: $completed job(s) processed")
             }
         }
     }
@@ -158,7 +158,7 @@ class InterpolationService : Service() {
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setContentIntent(open)
-            .addAction(0, "Annuler", cancel)
+            .addAction(0, "Cancel", cancel)
             .build()
     }
 

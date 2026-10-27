@@ -128,6 +128,47 @@ class RifeEngineTest {
     }
 
     @Test
+    fun `static dimensions match the dynamic graph exactly`() {
+        if (!modelFile.isFile) return
+        val w = 64
+        val h = 48
+        val f0 = resource("frame0.f32")
+        val f1 = resource("frame1.f32")
+        val dynamic = FloatArray(w * h * 3)
+        val statics = FloatArray(w * h * 3)
+
+        RifeEngine(modelFile.absolutePath, intraOpThreads = 2).use { engine ->
+            engine.interpolate(f0, f1, w, h, 0.5f, dynamic)
+        }
+        var resolved = false
+        RifeEngine(modelFile.absolutePath, intraOpThreads = 2, frameWidth = w, frameHeight = h).use { engine ->
+            resolved = engine.staticShapes
+            engine.interpolate(f0, f1, w, h, 0.5f, statics)
+        }
+
+        // Resolving the symbolic dimensions must not change a single value: it only lets the
+        // execution providers pre-plan their kernels.
+        assertTrue("symbolic dimensions were not resolved", resolved)
+        assertEquals(0f, maxAbsDiff(dynamic, statics), 1e-6f)
+    }
+
+    @Test
+    fun `static dimensions work off the 32 pixel grid`() {
+        if (!modelFile.isFile) return
+        val w = 50
+        val h = 34
+        val f0 = FloatArray(w * h * 3) { 0.2f + (it % 17) / 100f }
+        val f1 = FloatArray(w * h * 3) { 0.6f + (it % 13) / 100f }
+        val dynamic = FloatArray(w * h * 3)
+        val statics = FloatArray(w * h * 3)
+        RifeEngine(modelFile.absolutePath, intraOpThreads = 2).use { it.interpolate(f0, f1, w, h, 0.5f, dynamic) }
+        RifeEngine(modelFile.absolutePath, intraOpThreads = 2, frameWidth = w, frameHeight = h).use {
+            it.interpolate(f0, f1, w, h, 0.5f, statics)
+        }
+        assertEquals(0f, maxAbsDiff(dynamic, statics), 1e-6f)
+    }
+
+    @Test
     fun `engine reports the model inputs`() {
         if (!modelFile.isFile) return
         val logs = mutableListOf<String>()

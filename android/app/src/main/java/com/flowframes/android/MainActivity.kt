@@ -1,6 +1,8 @@
 package com.flowframes.android
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -12,6 +14,11 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -20,8 +27,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.flowframes.android.job.AppGraph
+import com.flowframes.android.job.EngineBenchmark
 import com.flowframes.android.job.InterpolationService
 import com.flowframes.android.job.JobItem
 import com.flowframes.android.ui.FlowFramesTheme
@@ -50,8 +60,50 @@ class MainActivity : ComponentActivity() {
         val logs by AppGraph.jobs.logs.collectAsState()
         val running by AppGraph.jobs.running.collectAsState()
         val settings by AppGraph.settings.state.collectAsState()
+        val benchmark by AppGraph.jobs.benchmark.collectAsState()
+        val benchmarkRunning by AppGraph.jobs.benchmarkRunning.collectAsState()
         val scope = rememberCoroutineScope()
         var showSettings by remember { mutableStateOf(false) }
+
+        val copyLogs: () -> Unit = {
+            val text = AppGraph.jobs.logText()
+            val clipboard = getSystemService(ClipboardManager::class.java)
+            clipboard?.setPrimaryClip(ClipData.newPlainText("FlowFrames logs", text))
+            AppGraph.jobs.addLog("Log copied to clipboard (${text.length} characters)")
+        }
+
+        val shareLogs: () -> Unit = {
+            val text = AppGraph.jobs.logText().ifEmpty { "FlowFrames: log is empty" }
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_SUBJECT, "FlowFrames Android logs")
+                putExtra(Intent.EXTRA_TEXT, text)
+            }
+            runCatching { startActivity(Intent.createChooser(send, "Share logs")) }
+        }
+
+        val runBenchmark: () -> Unit = {
+            if (!benchmarkRunning && !running) {
+                AppGraph.jobs.benchmarkRunning.value = true
+                AppGraph.jobs.addLog("▶ Engine benchmark started")
+                scope.launch {
+                    val report = withContext(Dispatchers.Default) {
+                        runCatching {
+                            EngineBenchmark.run(
+                                context = this@MainActivity,
+                                settings = AppGraph.settings.current,
+                                report = { line -> AppGraph.jobs.addLog(line) }
+                            )
+                        }.getOrElse { t ->
+                            "=== FLOWFRAMES ENGINE BENCHMARK ===\n" +
+                                "Benchmark failed: ${t.message ?: t.javaClass.simpleName}"
+                        }
+                    }
+                    AppGraph.jobs.benchmark.value = report
+                    AppGraph.jobs.benchmarkRunning.value = false
+                }
+            }
+        }
 
         val addLauncher = rememberLauncherForActivityResult(
             ActivityResultContracts.OpenMultipleDocuments()
@@ -75,7 +127,7 @@ class MainActivity : ComponentActivity() {
                     )
                 }
                 AppGraph.settings.update { it.copy(outputTreeUri = uri.toString()) }
-                AppGraph.jobs.addLog("Dossier de sortie: $uri")
+                AppGraph.jobs.addLog("Output folder: $uri")
             }
         }
 
@@ -101,7 +153,11 @@ class MainActivity : ComponentActivity() {
                 onChange = { transform -> AppGraph.settings.update(transform) },
                 onBack = { showSettings = false },
                 onPickOutputFolder = { treeLauncher.launch(null) },
-                onResetOutputFolder = { AppGraph.settings.clearOutputFolder() }
+                onResetOutputFolder = { AppGraph.settings.clearOutputFolder() },
+                onRunBenchmark = runBenchmark,
+                benchmarkRunning = benchmarkRunning || running,
+                onCopyLogs = copyLogs,
+                onShareLogs = shareLogs
             )
         } else {
             MainScreen(
@@ -114,7 +170,33 @@ class MainActivity : ComponentActivity() {
                 onCancel = { InterpolationService.cancel(this@MainActivity) },
                 onOpenSettings = { showSettings = true },
                 onClearFinished = { AppGraph.jobs.clearFinished() },
+                onCopyLogs = copyLogs,
+                onShareLogs = shareLogs,
                 onRemove = { id -> AppGraph.jobs.remove(id) }
+            )
+        }
+
+        benchmark?.let { report ->
+            AlertDialog(
+                onDismissRequest = { AppGraph.jobs.setBenchmark(null) },
+                title = { Text("Engine benchmark", fontSize = 16.sp) },
+                text = {
+                    Text(
+                        report,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        modifier = androidx.compose.ui.Modifier.verticalScroll(rememberScrollState())
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { AppGraph.jobs.setBenchmark(null) }) { Text("Close") }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        val clipboard = getSystemService(ClipboardManager::class.java)
+                        clipboard?.setPrimaryClip(ClipData.newPlainText("FlowFrames benchmark", report))
+                    }) { Text("Copy") }
+                }
             )
         }
     }
@@ -131,7 +213,7 @@ class MainActivity : ComponentActivity() {
 
         val info = VideoInfo.read(this, uri)
         if (info == null) {
-            AppGraph.jobs.addLog("⚠ $displayName : impossible de lire les métadonnées")
+            AppGraph.jobs.addLog("⚠ $displayName: could not read metadata")
         }
         return JobItem(
             id = UUID.randomUUID().toString(),
