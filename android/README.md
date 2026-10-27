@@ -556,7 +556,11 @@ Mesures de la 1.5.1 sur Adreno 840, canevas de 1920x1088, en ms par inférence :
 - **Benchmark** en vue simple : configurations GPU seulement (plus RIFE 4.6 ×1 et 4.6 fp16 +
   coopmat), la référence ONNX reste pour le contrôle de qualité.
 
-## Limites connues
+### Version 1.6.4 — signature v1
+
+- L'installateur Honor refusait la 1.6.3 (« does not contain any certificates ») : Gradle omet la
+  signature v1 (JAR) quand minSdk ≥ 24 et cet installateur ne lit que celle-là. La CI re-signe
+  maintenant l'APK avec `apksigner` en v1 + v2 + v3 et échoue si la v1 manque.
 
 * Sortie **MP4 uniquement** (H.264 ou HEVC), pas de GIF/PNG/MKV.
 * Les codecs décodables sont ceux exposés par `MediaCodec` sur l'appareil (H.264, HEVC, VP8/VP9

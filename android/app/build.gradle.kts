@@ -20,8 +20,8 @@ android {
         applicationId = "com.flowframes.android"
         minSdk = 26
         targetSdk = 34
-        versionCode = 12
-        versionName = "1.6.3"
+        versionCode = 13
+        versionName = "1.6.4"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Ship 64-bit ARM by default (every Android phone since ~2016).
