@@ -14,8 +14,10 @@ vidéo source ──► MediaCodec (décodage matériel) ──► RIFE 4.9 / nc
 
 ## Installation
 
-L'APK signé est fourni avec le module : `android/app/build/outputs/apk/release/app-release.apk`
-(copie de distribution : `artifacts/FlowFrames-Android-1.0.0.apk`).
+L'APK signé est publié en tant qu'asset de la release GitHub :
+[`FlowFrames-Android.apk`](https://github.com/maxandre1905/flowframes/releases/latest) — construit et signé
+par la CI (`.github/workflows/android-release.yml`) à chaque tag `android-v*`. Pour le compiler
+soi-même, voir « Compiler soi-même ».
 
 1. Copiez l'APK sur le téléphone (ou `adb install -r app-release.apk`).
 2. Autorisez l'installation depuis une source inconnue si Android le demande.
@@ -122,7 +124,7 @@ Sortie : `app/build/outputs/apk/release/app-release.apk`.
 ### Tests
 
 ```bash
-./gradlew testDebugUnitTest        # 48 tests JVM (moteur RIFE vs référence Python, YUV, plan, nommage)
+./gradlew testDebugUnitTest        # 64 tests JVM exécutés (74 collectés) : moteur RIFE vs référence Python, YUV, plan, nommage, timeline
 ./gradlew connectedDebugAndroidTest # tests instrumentés (pipeline complet + UI) sur appareil/émulateur
 ```
 
@@ -147,13 +149,15 @@ adb shell am instrument -w \
 | Vérification | Résultat |
 |---|---|
 | Compilation (debug + release, lint vital) | ✅ |
-| 48 tests unitaires JVM | ✅ |
+| 64 tests unitaires JVM exécutés (74 collectés ; les 10 autres exigent la lib native hôte ou la sonde de perf) | ✅ |
 | Sortie du moteur RIFE identique à la référence Python (deux modèles, 3 phases) | ✅ |
 | APK signé, installé et démarré sur Android 12 (émulateur x86_64) | ✅ |
 | Encodage MP4 de bout en bout par `VideoEncoder` (images réelles) | ✅ |
 | Lecture des métadonnées, ouverture du décodeur, chargement du modèle ONNX + XNNPACK | ✅ |
 | Pipeline complet décodage → RIFE → encodage → mux sur Android 12 | ✅ test instrumenté passé |
-| Interface Compose (rendu, navigation) | ⚠️ test écrit, exécution non confirmée |
+| Interface Compose (rendu, navigation) | ⚠️ test écrit (libellés anglais), exécution non confirmée |
+| 1.6.5 : compilation release + 64 tests JVM sur une chaîne d'outils propre (JDK 17, SDK 34, NDK r30, CMake 3.22.1) | ✅ |
+| 1.6.5 : tests instrumentés (pipeline, UI) | ⚠️ non exécutés ici : `/dev/kvm` inaccessible, l'émulateur tournerait sans accélération |
 
 Le test `PipelineEndToEndTest` a été exécuté sur un émulateur Android 12 : à partir d'une vidéo
 de 4 images, la sortie fait 7 images en 60 fps, relue correctement par `VideoInfo`, avec un MP4
@@ -569,6 +573,29 @@ Mesures de la 1.5.1 sur Adreno 840, canevas de 1920x1088, en ms par inférence :
   ce qui peut décaler légèrement les cas extrêmes.
 * L'interpolation de RIFE est purement 2D : pas de vecteurs de mouvement 3D ni d'audio.
 * Sur un appareil sans encodeur HEVC, la sortie repasse automatiquement en H.264.
+
+### Version 1.6.5 — fin de flux explicite
+
+Quatre défauts trouvés en relisant le pipeline, corrigés sans toucher au débit :
+
+* **Un blocage n'est plus une fin de fichier.** Le décodeur abandonnait après 15 s sans sortie et
+  renvoyait la même chose que la fin du flux : un appareil lent ou bridé thermiquement pouvait donc
+  écrire une vidéo plus courte que l'entrée **sans aucune erreur**. `decodeNext` renvoie maintenant
+  `Frame`, `EndOfStream` ou `Stalled`, le délai fixe a disparu (seuls 60 s sans le moindre progrès
+  comptent comme un blocage), et un blocage fait échouer la tâche avec un message explicite : la
+  sortie partielle est supprimée.
+* **L'encodeur dit s'il a confirmé la fin du flux** (`Finish.COMPLETE`, `END_OF_STREAM_REJECTED`,
+  `END_OF_STREAM_UNCONFIRMED`) et le journal signale une queue éventuellement manquante, au lieu de
+  laisser croire que le fichier est complet.
+* **Garde-fou de durée** : si la sortie couvre moins de 90 % de la source, le journal écrit
+  `⚠ Output covers …` au lieu de laisser passer un fichier tronqué pour un succès.
+* **Clamp de `argbToYuv420`** : la borne est appliquée avant la conversion en octet ; l'ancienne
+  forme appelait `clamp(v: Byte)`, une surcharge identité qui ne bornait donc rien (les valeurs
+  restaient dans l'intervalle, le défaut était latent).
+
+Côté tests, `UiSmokeTest` vérifie les libellés anglais réellement affichés : il cherchait encore
+« Ajouter », « Réglages », « Qualité du modèle » et n'aurait jamais pu passer depuis la traduction
+de la 1.2.0.
 
 ## Crédits et licences
 

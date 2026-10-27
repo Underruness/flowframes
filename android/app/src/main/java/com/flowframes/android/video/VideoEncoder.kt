@@ -33,6 +33,13 @@ class VideoEncoder(
     private val scratch = YuvConverter.EncScratch()
     private val audioTrackIndex: Int
     private var videoTrackIndex = -1
+
+    /**
+     * How the encoder finished, so the caller can tell a complete file from a possibly truncated
+     * one instead of assuming success.
+     */
+    enum class Finish { COMPLETE, END_OF_STREAM_REJECTED, END_OF_STREAM_UNCONFIRMED }
+
     private var muxerStarted = false
     private var codecStarted = false
 
@@ -40,7 +47,7 @@ class VideoEncoder(
 
     init {
         require(width > 1 && height > 1 && width % 2 == 0 && height % 2 == 0) {
-            "Dimensions invalides pour l'encodeur: ${width}x$height"
+            "Invalid encoder dimensions: ${width}x$height (both sides must be even)"
         }
         // The audio track has to be registered before muxer.start().
         var audio = -1
@@ -138,7 +145,7 @@ class VideoEncoder(
     }
 
     private fun noInputImage(): Nothing = throw IllegalStateException(
-        "Cet appareil n'expose pas d'entrée YUV flexible pour l'encodeur (getInputImage = null)"
+        "This device exposes no flexible YUV input for the encoder (getInputImage returned null)"
     )
 
     /**
@@ -148,8 +155,8 @@ class VideoEncoder(
      * later than the dequeue timeout), and blocking the pipeline on that would leave the user
      * staring at a frozen progress bar at the end of every job.
      */
-    fun finishVideo() {
-        if (!codecStarted) return
+    fun finishVideo(): Finish {
+        if (!codecStarted) return Finish.COMPLETE
         var queued = false
         val deadline = System.currentTimeMillis() + 5_000
         while (System.currentTimeMillis() < deadline) {
@@ -162,9 +169,17 @@ class VideoEncoder(
             drain(false)
         }
         if (!queued) log("Encoder: end-of-stream rejected, closing directly")
-        drain(true)
+        val confirmedEnd = drain(true)
+        if (queued && !confirmedEnd) {
+            log("Encoder: the end-of-stream marker never came back, the last samples may be missing")
+        }
         runCatching { codec.stop() }
         codecStarted = false
+        return when {
+            !queued -> Finish.END_OF_STREAM_REJECTED
+            !confirmedEnd -> Finish.END_OF_STREAM_UNCONFIRMED
+            else -> Finish.COMPLETE
+        }
     }
 
     fun writeAudioSample(buffer: java.nio.ByteBuffer, info: MediaCodec.BufferInfo) {
@@ -270,7 +285,8 @@ class VideoEncoder(
         }
     }
 
-    private fun drain(endOfStream: Boolean) {
+    /** Drains encoded samples into the muxer. Returns true when the end-of-stream flag was seen. */
+    private fun drain(endOfStream: Boolean): Boolean {
         val deadline = System.currentTimeMillis() + if (endOfStream) 8_000 else 1_500
         while (System.currentTimeMillis() < deadline) {
             val outIndex = codec.dequeueOutputBuffer(bufferInfo, if (endOfStream) 20_000L else 0L)
@@ -293,14 +309,15 @@ class VideoEncoder(
                     }
                     val eos = bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
                     codec.releaseOutputBuffer(outIndex, false)
-                    if (eos) return
+                    if (eos) return true
                 }
 
                 else -> {
-                    if (!endOfStream) return
+                    if (!endOfStream) return false
                 }
             }
         }
+        return false
     }
 
     override fun close() {

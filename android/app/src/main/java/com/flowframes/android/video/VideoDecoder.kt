@@ -19,7 +19,22 @@ class VideoDecoder(
     private val log: (String) -> Unit = {}
 ) : AutoCloseable {
 
-    data class Frame(val ptsUs: Long)
+    /**
+     * What one [decodeNext] call produced.
+     *
+     * The end of a file and a decoder that stopped answering are reported separately on purpose: a
+     * caller that treats a stall as the end of the video writes a truncated file without any error.
+     */
+    sealed class Result {
+        /** A frame was written into the caller's buffer. */
+        data class Frame(val ptsUs: Long) : Result()
+
+        /** No more frames: the input ran out and the codec stopped asking for work. */
+        object EndOfStream : Result()
+
+        /** The decoder produced nothing for [STALL_TIMEOUT_MS] while input was still pending. */
+        object Stalled : Result()
+    }
 
     private val extractor = MediaExtractor()
     private val codec: MediaCodec
@@ -63,11 +78,16 @@ class VideoDecoder(
     }
 
     /** Decodes the next frame into [out] (targetWidth x targetHeight ARGB). */
-    fun decodeNext(out: IntArray): Frame? {
-        if (outputDone) return null
-        val deadline = System.currentTimeMillis() + 15_000
-        while (System.currentTimeMillis() < deadline) {
-            if (!inputDone) feedInput()
+    fun decodeNext(out: IntArray): Result {
+        if (outputDone) return Result.EndOfStream
+        // There is no fixed per-frame deadline any more: a slow or throttled device must make the
+        // job take longer, never make it end the video early. The timer below only fires when the
+        // codec stops making progress at all — feeding input, dequeuing output or a format change.
+        var lastProgressAt = System.currentTimeMillis()
+        while (true) {
+            var progress = false
+            if (!inputDone && feedInput()) progress = true
+
             val outIndex = codec.dequeueOutputBuffer(bufferInfo, 10_000)
             when {
                 outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
@@ -75,43 +95,48 @@ class VideoDecoder(
                     codedWidth = f.getInteger(MediaFormat.KEY_WIDTH)
                     codedHeight = f.getInteger(MediaFormat.KEY_HEIGHT)
                     spec = VideoInfo.colorSpecFor(f, codedHeight)
+                    progress = true
                 }
 
                 outIndex >= 0 -> {
+                    progress = true
                     val isEos = bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
                     val hasFrame = bufferInfo.size > 0
+                    val pts = bufferInfo.presentationTimeUs
                     if (hasFrame) {
-                        val image = codec.getOutputImage(outIndex)
-                        if (image != null) {
-                            image.use { copyImageToArgb(it, out) }
-                        }
-                        val pts = bufferInfo.presentationTimeUs
-                        codec.releaseOutputBuffer(outIndex, false)
-                        if (isEos) outputDone = true
-                        lastPtsUs = pts
-                        return Frame(pts)
+                        codec.getOutputImage(outIndex)?.use { copyImageToArgb(it, out) }
                     }
                     codec.releaseOutputBuffer(outIndex, false)
-                    if (isEos) {
-                        outputDone = true
-                        return null
+                    if (isEos) outputDone = true
+                    if (hasFrame) {
+                        lastPtsUs = pts
+                        return Result.Frame(pts)
                     }
-                }
-
-                outIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {
-                    if (outputDone) return null
-                    if (inputDone && bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return null
+                    if (outputDone) return Result.EndOfStream
                 }
             }
+
+            val now = System.currentTimeMillis()
+            if (progress) lastProgressAt = now
+            val idleMs = now - lastProgressAt
+            if (idleMs < STALL_TIMEOUT_MS) continue
+            if (inputDone) {
+                // Every sample has been queued and the codec is quiet: plenty of decoders never
+                // flag the end of the stream, so this is the end of the file, and it is logged.
+                log("Decoder: no output for ${idleMs / 1000} s after the end of the input, treating it as the end of the stream")
+                outputDone = true
+                return Result.EndOfStream
+            }
+            log("Decoder: no output for ${idleMs / 1000} s while input was still pending")
+            return Result.Stalled
         }
-        log("Decoder: iteration limit reached")
-        return null
     }
 
-    private fun feedInput() {
+    /** Queues input until the codec input buffer is full. Returns true when it queued something. */
+    private fun feedInput(): Boolean {
         val inIndex = codec.dequeueInputBuffer(10_000)
-        if (inIndex < 0) return
-        val buffer = codec.getInputBuffer(inIndex) ?: return
+        if (inIndex < 0) return false
+        val buffer = codec.getInputBuffer(inIndex) ?: return false
         val size = extractor.readSampleData(buffer, 0)
         if (size < 0) {
             codec.queueInputBuffer(inIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
@@ -120,6 +145,7 @@ class VideoDecoder(
             codec.queueInputBuffer(inIndex, 0, size, extractor.sampleTime.coerceAtLeast(0L), 0)
             extractor.advance()
         }
+        return true
     }
 
     /**
@@ -147,5 +173,10 @@ class VideoDecoder(
         runCatching { if (started) codec.stop() }
         runCatching { codec.release() }
         runCatching { extractor.release() }
+    }
+
+    private companion object {
+        /** How long the decoder may produce nothing before it is considered stuck or finished. */
+        const val STALL_TIMEOUT_MS = 60_000L
     }
 }

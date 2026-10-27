@@ -506,7 +506,7 @@ fun SettingsScreen(
 
             Section("About") {
                 Text(
-                    "FlowFrames Android 1.6.4 — a rewrite of the FlowFrames (Windows) pipeline for Android: " +
+                    "FlowFrames Android 1.6.5 — a rewrite of the FlowFrames (Windows) pipeline for Android: " +
                         "MediaCodec decoding, RIFE interpolation on the GPU (ncnn Vulkan) or the CPU, hardware encoding " +
                         "and MP4 muxing.",
                     fontSize = 12.sp,
