@@ -32,7 +32,7 @@ class RifeEngine(
     frameHeight: Int = 0,
     profileDir: File? = null,
     private val log: (String) -> Unit = {}
-) : AutoCloseable {
+) : FrameEngine {
 
     /** Two separate frame inputs (`img0`/`img1`) instead of one 6-channel tensor. */
     private val splitFrames: Boolean
@@ -139,7 +139,13 @@ class RifeEngine(
      * @param frame1 planar RGB, size 3*width*height
      * @param out planar RGB result, size 3*width*height
      */
-    fun interpolate(frame0: FloatArray, frame1: FloatArray, width: Int, height: Int, t: Float, out: FloatArray) {
+    override val label: String
+        get() = "ONNX Runtime $providers ×$threads · $modelName" + if (staticShapes) " · static shapes" else ""
+
+    /** One ORT session per thread: the pool gives every worker its own engine. */
+    override val threadSafe: Boolean get() = false
+
+    override fun interpolate(frame0: FloatArray, frame1: FloatArray, width: Int, height: Int, t: Float, out: FloatArray) {
         val planeSize = width * height
         require(frame0.size >= planeSize * 3 && frame1.size >= planeSize * 3) { "frame buffers too small" }
         require(out.size >= planeSize * 3) { "output buffer too small" }

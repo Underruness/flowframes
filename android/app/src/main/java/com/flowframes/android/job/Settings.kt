@@ -5,6 +5,21 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 enum class AiQuality { FAST, HIGH }
+
+/** Which runtime computes RIFE. */
+enum class EngineKind(val label: String) {
+    /** ncnn on the GPU when Vulkan works (self-tested at start), else ncnn on the CPU. */
+    AUTO("Automatic"),
+    NCNN_GPU("GPU (ncnn Vulkan)"),
+    NCNN_CPU("CPU (ncnn)"),
+    ORT_CPU("CPU (ONNX Runtime)")
+}
+
+/** RIFE weights for the ncnn engine (ONNX Runtime always uses its bundled 4.9). */
+enum class NcnnModel(val dir: String, val label: String, val padding: Int) {
+    V4_9("rife-v4.9", "RIFE 4.9", 32),
+    V4_6("rife-v4.6", "RIFE 4.6 (faster)", 32)
+}
 enum class OutputCodec(val mime: String, val label: String) {
     H264("video/avc", "H.264"),
     HEVC("video/hevc", "HEVC (H.265)")
@@ -46,7 +61,15 @@ data class Settings(
      * in parallel: 0 = automatic (see [com.flowframes.android.core.InferencePool]).
      */
     val workers: Int = 0,
-    val outputTreeUri: String? = null
+    val outputTreeUri: String? = null,
+    /** Runtime; AUTO picks the GPU when the phone's Vulkan driver passes the start-up self-test. */
+    val engine: EngineKind = EngineKind.AUTO,
+    val ncnnModel: NcnnModel = NcnnModel.V4_9,
+    /**
+     * ncnn fp16 arithmetic (GPU, and ARMv8.2 CPU kernels). Measured 50 dB PSNR against fp32 on RIFE
+     * 4.9 — invisible — for up to twice the ALU throughput on mobile GPUs.
+     */
+    val fp16: Boolean = true
 ) {
     fun planOptions(): com.flowframes.android.core.InterpPlan.Options = com.flowframes.android.core.InterpPlan.Options(
         factor = factor,
@@ -100,7 +123,12 @@ class SettingsStore(context: Context) {
             parallelOps = prefs.getBoolean("parallelOps", d.parallelOps),
             threads = prefs.getInt("threads", d.threads).coerceIn(0, 16),
             workers = prefs.getInt("workers", d.workers).coerceIn(0, 6),
-            outputTreeUri = prefs.getString("outputTreeUri", d.outputTreeUri)
+            outputTreeUri = prefs.getString("outputTreeUri", d.outputTreeUri),
+            engine = runCatching { EngineKind.valueOf(prefs.getString("engine", d.engine.name)!!) }
+                .getOrDefault(d.engine),
+            ncnnModel = runCatching { NcnnModel.valueOf(prefs.getString("ncnnModel", d.ncnnModel.name)!!) }
+                .getOrDefault(d.ncnnModel),
+            fp16 = prefs.getBoolean("fp16", d.fp16)
         )
     }
 
@@ -125,6 +153,9 @@ class SettingsStore(context: Context) {
             .putInt("threads", s.threads)
             .putInt("workers", s.workers)
             .putString("outputTreeUri", s.outputTreeUri)
+            .putString("engine", s.engine.name)
+            .putString("ncnnModel", s.ncnnModel.name)
+            .putBoolean("fp16", s.fp16)
             .apply()
     }
 }

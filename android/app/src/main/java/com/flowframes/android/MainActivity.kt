@@ -34,6 +34,7 @@ import androidx.core.content.ContextCompat
 import com.flowframes.android.job.AppGraph
 import com.flowframes.android.core.RifeEngine
 import com.flowframes.android.job.EngineBenchmark
+import com.flowframes.android.job.EngineKind
 import com.flowframes.android.job.InterpolationService
 import com.flowframes.android.job.JobItem
 import com.flowframes.android.ui.FlowFramesTheme
@@ -199,10 +200,16 @@ class MainActivity : ComponentActivity() {
                         benchmarkBest?.let { best ->
                             TextButton(onClick = {
                                 AppGraph.settings.update { s ->
+                                    val gpu = best.engine == EngineKind.NCNN_GPU
                                     s.copy(
+                                        // The GPU winner keeps "automatic": the job re-checks Vulkan at
+                                        // every start and falls back to the CPU on a broken driver.
+                                        engine = if (gpu) EngineKind.AUTO else best.engine,
+                                        ncnnModel = best.ncnnModel,
+                                        fp16 = best.fp16,
                                         // 0 keeps "automatic", so a later CPU change still adapts.
-                                        threads = if (best.totalThreads == RifeEngine.defaultThreads()) 0 else best.totalThreads,
-                                        workers = best.workers,
+                                        threads = if (gpu || best.totalThreads == RifeEngine.defaultThreads()) 0 else best.totalThreads,
+                                        workers = if (gpu && best.workers == 2) 0 else best.workers,
                                         useXnnpack = best.useXnnpack,
                                         parallelOps = best.parallelOps,
                                         useNnapi = false

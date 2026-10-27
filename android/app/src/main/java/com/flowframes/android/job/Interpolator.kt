@@ -16,7 +16,6 @@ import com.flowframes.android.core.InterpPlan
 import com.flowframes.android.core.LatencyStats
 import com.flowframes.android.core.Naming
 import com.flowframes.android.core.OrderedWindow
-import com.flowframes.android.core.RifeEngine
 import com.flowframes.android.video.VideoDecoder
 import com.flowframes.android.video.VideoEncoder
 import com.flowframes.android.video.VideoInfo
@@ -166,31 +165,16 @@ class Interpolator(
                 log("Audio track unreadable, output will be silent")
             }
 
-            val modelPath = ModelStore.prepare(context, settings.quality, log)
-            val automatic = RifeEngine.defaultThreads()
-            val totalThreads = if (settings.threads > 0) settings.threads else automatic
-            val workers = (if (settings.workers > 0) settings.workers else InferencePool.defaultWorkers())
-                .coerceAtMost(totalThreads)
-            val threadsPerWorker = (totalThreads / workers).coerceAtLeast(1)
-            log(
-                "Threads: $totalThreads" +
-                    (if (settings.threads > 0) " (manual)" else " (automatic: cores - 2, capped at 6)") +
-                    " · $workers parallel inference(s) of $threadsPerWorker threads · " +
-                    "${settings.factor - 1} inference(s) per source frame"
-            )
-            if (settings.useNnapi) {
+            log("${settings.factor - 1} inference(s) per source frame · engine setting: ${settings.engine.label}")
+            if (settings.useNnapi && EngineFactory.chain(settings).first() == EngineKind.ORT_CPU) {
                 log("NNAPI requested: it was 6x slower than the CPU on a Snapdragon 8 Elite. Run the benchmark to compare on this device.")
             }
 
-            InferencePool(
-                modelPath = modelPath,
-                workers = workers,
-                threadsPerWorker = threadsPerWorker,
-                useNnapi = settings.useNnapi,
-                useXnnpack = settings.useXnnpack,
-                parallelOps = settings.parallelOps,
-                frameWidth = targetW,
-                frameHeight = targetH,
+            EngineFactory.build(
+                context = context,
+                settings = settings,
+                width = targetW,
+                height = targetH,
                 log = log
             ).use { pool ->
                 val outPfd = outTarget.fd

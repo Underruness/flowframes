@@ -20,8 +20,8 @@ android {
         applicationId = "com.flowframes.android"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "1.4.0"
+        versionCode = 6
+        versionName = "1.5.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Ship 64-bit ARM by default (every Android phone since ~2016).
@@ -63,6 +63,15 @@ android {
         }
     }
 
+    // Native RIFE engine (ncnn + Vulkan). CMake downloads the ncnn prebuilt on the first build.
+    ndkVersion = "30.0.16248370"
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
     buildFeatures {
         compose = true
     }
@@ -73,7 +82,7 @@ android {
 
     androidResources {
         // RIFE models are copied to internal storage on first launch; keep them uncompressed.
-        noCompress += "onnx"
+        noCompress += listOf("onnx", "param", "bin")
     }
 
     compileOptions {
@@ -93,6 +102,13 @@ android {
 
     testOptions {
         unitTests.isReturnDefaultValues = true
+        // Host build of the native engine (android/native-test): lets NcnnRifeEngineTest drive the
+        // real JNI library on the JVM. Without it those tests are skipped.
+        //   ./gradlew testDebugUnitTest -PnativeTestLib=/path/to/dir/with/libflowframes_rife.so
+        val nativeTestLib = project.findProperty("nativeTestLib") as String?
+        if (nativeTestLib != null) {
+            unitTests.all { it.systemProperty("java.library.path", nativeTestLib) }
+        }
     }
 }
 

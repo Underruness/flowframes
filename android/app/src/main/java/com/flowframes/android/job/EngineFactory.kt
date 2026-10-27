@@ -1,0 +1,152 @@
+package com.flowframes.android.job
+
+import android.content.Context
+import com.flowframes.android.core.FrameEngine
+import com.flowframes.android.core.InferencePool
+import com.flowframes.android.core.NcnnRifeEngine
+import com.flowframes.android.core.RifeEngine
+import java.util.Locale
+import kotlin.math.log10
+
+/**
+ * Picks and builds the inference engine for a job.
+ *
+ * The GPU path is only trusted after a self-test at the job's own resolution: RIFE asked to
+ * interpolate a frame with itself must give that frame back. A Vulkan driver that crashes, returns
+ * zeros or NaNs fails that test and the job falls back to the next engine instead of producing a
+ * broken video. The same pass warms the engine up (shader compilation, allocations).
+ */
+object EngineFactory {
+
+    /** Minimum PSNR of the identity test; a working engine scores 40-60 dB, a broken one < 15. */
+    private const val SELF_TEST_MIN_DB = 30.0
+
+    data class Choice(val kind: EngineKind, val workers: Int, val threadsPerWorker: Int)
+
+    fun chain(settings: Settings): List<EngineKind> = when {
+        // The ensemble ("High quality") weights only exist as an ONNX export.
+        settings.quality == AiQuality.HIGH -> listOf(EngineKind.ORT_CPU)
+        else -> when (settings.engine) {
+            EngineKind.AUTO, EngineKind.NCNN_GPU -> listOf(EngineKind.NCNN_GPU, EngineKind.NCNN_CPU, EngineKind.ORT_CPU)
+            EngineKind.NCNN_CPU -> listOf(EngineKind.NCNN_CPU, EngineKind.ORT_CPU)
+            EngineKind.ORT_CPU -> listOf(EngineKind.ORT_CPU)
+        }
+    }
+
+    /** Workers and threads for [kind], honouring the manual settings when they are set. */
+    fun plan(kind: EngineKind, settings: Settings): Choice {
+        val totalThreads = if (settings.threads > 0) settings.threads else RifeEngine.defaultThreads()
+        return when (kind) {
+            // Two calls in flight keep the GPU busy while the other one copies frames in and out.
+            EngineKind.NCNN_GPU -> Choice(kind, if (settings.workers > 0) settings.workers else 2, 2)
+            else -> {
+                val workers = (if (settings.workers > 0) settings.workers else InferencePool.defaultWorkers())
+                    .coerceAtMost(totalThreads)
+                Choice(kind, workers, (totalThreads / workers).coerceAtLeast(1))
+            }
+        }
+    }
+
+    fun build(
+        context: Context,
+        settings: Settings,
+        width: Int,
+        height: Int,
+        log: (String) -> Unit
+    ): InferencePool {
+        if (settings.quality == AiQuality.HIGH && settings.engine != EngineKind.ORT_CPU) {
+            log("High quality (ensemble) runs on ONNX Runtime: the GPU engine only has the fast model")
+        }
+        val failures = ArrayList<String>()
+        for (kind in chain(settings)) {
+            val choice = plan(kind, settings)
+            val pool = runCatching { create(context, settings, choice, width, height, log) }
+                .getOrElse { t ->
+                    val reason = t.message ?: t.javaClass.simpleName
+                    failures += "${kind.label}: $reason"
+                    log("Engine ${kind.label} unavailable: $reason")
+                    null
+                } ?: continue
+            val verdict = runCatching { selfTest(pool.primary, width, height) }
+            val db = verdict.getOrNull()
+            if (db != null && db >= SELF_TEST_MIN_DB) {
+                log(String.format(Locale.US, "Engine self-test passed (%.1f dB) · %s", db, pool.label))
+                if (failures.isNotEmpty()) log("Fell back after: ${failures.joinToString(" · ")}")
+                return pool
+            }
+            val reason = verdict.exceptionOrNull()?.message
+                ?: String.format(Locale.US, "self-test %.1f dB < %.0f dB (wrong output)", db ?: 0.0, SELF_TEST_MIN_DB)
+            failures += "${kind.label}: $reason"
+            log("Engine ${kind.label} rejected: $reason")
+            runCatching { pool.close() }
+        }
+        throw IllegalStateException("No inference engine works on this device: ${failures.joinToString(" · ")}")
+    }
+
+    /** Builds a pool without the self-test (the benchmark measures failures itself). */
+    fun create(
+        context: Context,
+        settings: Settings,
+        choice: Choice,
+        width: Int,
+        height: Int,
+        log: (String) -> Unit
+    ): InferencePool = when (choice.kind) {
+        EngineKind.NCNN_GPU, EngineKind.AUTO -> {
+            check(NcnnRifeEngine.isAvailable) { "native library missing" }
+            check(NcnnRifeEngine.gpuCount() > 0) { "no Vulkan GPU" }
+            val dir = ModelStore.prepareNcnn(context, settings.ncnnModel, log)
+            val engine = NcnnRifeEngine(dir, gpuId = 0, cpuThreads = 2, padding = settings.ncnnModel.padding, fp16 = settings.fp16)
+            InferencePool(listOf<FrameEngine>(engine), choice.workers, 0, log)
+        }
+        EngineKind.NCNN_CPU -> {
+            check(NcnnRifeEngine.isAvailable) { "native library missing" }
+            val dir = ModelStore.prepareNcnn(context, settings.ncnnModel, log)
+            val engine = NcnnRifeEngine(
+                dir, gpuId = -1, cpuThreads = choice.threadsPerWorker,
+                padding = settings.ncnnModel.padding, fp16 = settings.fp16
+            )
+            InferencePool(listOf<FrameEngine>(engine), choice.workers, choice.threadsPerWorker, log)
+        }
+        EngineKind.ORT_CPU -> InferencePool(
+            modelPath = ModelStore.prepare(context, settings.quality, log),
+            workers = choice.workers,
+            threadsPerWorker = choice.threadsPerWorker,
+            useNnapi = settings.useNnapi,
+            useXnnpack = settings.useXnnpack,
+            parallelOps = settings.parallelOps,
+            frameWidth = width,
+            frameHeight = height,
+            log = log
+        )
+    }
+
+    /**
+     * Interpolates a textured frame with itself at t = 0.5 and returns the PSNR of the result
+     * against that frame. Any correct RIFE returns the input (no motion to compensate).
+     */
+    fun selfTest(engine: FrameEngine, width: Int, height: Int): Double {
+        val plane = width * height
+        val frame = FloatArray(plane * 3)
+        for (c in 0 until 3) {
+            for (y in 0 until height) {
+                for (x in 0 until width) {
+                    val v = 0.5 + 0.25 * kotlin.math.sin((x + 7 * c) * 0.11) * kotlin.math.cos((y - 3 * c) * 0.07) +
+                        0.2 * ((x + y + 13 * c) % 64) / 64.0
+                    frame[c * plane + y * width + x] = v.toFloat().coerceIn(0f, 1f)
+                }
+            }
+        }
+        val out = FloatArray(plane * 3)
+        engine.interpolate(frame, frame, width, height, 0.5f, out)
+        var se = 0.0
+        for (i in frame.indices) {
+            val o = out[i]
+            if (o.isNaN() || o.isInfinite()) return 0.0
+            val d = (o - frame[i]).toDouble()
+            se += d * d
+        }
+        val mse = se / frame.size
+        return if (mse <= 1e-12) 99.0 else 10.0 * log10(1.0 / mse)
+    }
+}

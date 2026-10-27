@@ -7,7 +7,8 @@ L'application d'origine est un programme Windows (C#/.NET + binaires NCNN/CUDA).
 `android/` ne réutilise pas ce code : il refait le même pipeline avec les API Android.
 
 ```
-vidéo source ──► MediaCodec (décodage matériel) ──► RIFE 4.9 / ONNX Runtime
+vidéo source ──► MediaCodec (décodage matériel) ──► RIFE 4.9 / ncnn Vulkan (GPU)
+                                                     └─ repli : ncnn CPU, puis ONNX Runtime CPU
               ──► MediaCodec (encodage matériel) ──► MediaMuxer (MP4 + audio copié)
 ```
 
@@ -385,6 +386,65 @@ Pistes suivantes, par ordre de rendement attendu :
 * **GPU** : `rife-ncnn-vulkan` est l'implémentation rapide de référence, mais elle demande du code
   natif NDK et un modèle ncnn ; impossible à valider depuis cette VM, donc pas livré.
 
+### Version 1.5.0 — RIFE sur le GPU (ncnn + Vulkan)
+
+La 1.4.0 concluait que 3 images source/s à x4 restaient hors de portée **sur le CPU**. La 1.5.0 change
+d'unité de calcul : RIFE tourne désormais sur le GPU du téléphone via **ncnn + Vulkan**, c'est-à-dire
+l'implémentation que FlowFrames utilise sur PC (`rife-ncnn-vulkan`), compilée en natif (NDK) dans l'APK.
+
+Pourquoi c'est le bon levier : sur le CPU, l'opérateur `GridSample` (le warp) n'a aucun noyau
+optimisé dans ONNX Runtime et coûtait ~43 % de chaque inférence ; sur le GPU, tout le graphe,
+warps compris, s'exécute en compute shaders fp16. Référence publique : RIFE 4.6 en ncnn atteint
+5,5 inférences/s en 720p sur un Snapdragon 8 Gen 3
+([hermitix](https://hermitix.com/2025/04/ncnn-rife-int8-quantization/)), soit ~17 inf/s une fois
+ramené aux 544×544 d'une vidéo 540×540. L'objectif (3 images source/s à x4) en demande 9.
+
+**Ce qui est livré**
+
+* `app/src/main/cpp/` : moteur natif (`rife_core.cpp`) + pont JNI (`rife_jni.cpp`) + couche
+  personnalisée `rife.Warp` de rife-ncnn-vulkan (licence MIT). Le shader de warp est modifié pour
+  garder ses **coordonnées d'échantillonnage en fp32** même quand le réseau calcule en fp16 (au-delà
+  de 512 px, le fp16 n'a qu'une précision de 0,25-0,5 px, ce qui flouterait le warp). Le chemin pack8,
+  supprimé des versions récentes de ncnn, est retiré.
+* ncnn 20261020 (`android-vulkan`, statique, Vulkan chargé à l'exécution via *simplevk*) : CMake le
+  télécharge au premier build. Un téléphone sans pilote Vulkan charge quand même la bibliothèque.
+* Modèles ncnn RIFE **4.9** (mêmes poids que le modèle ONNX) et **4.6** (~25 % plus léger) dans
+  `assets/ncnn/`.
+* `FrameEngine` : interface commune aux moteurs ; `InferencePool` accepte un moteur partagé
+  thread-safe (ncnn : un extracteur par appel) et attache désormais chaque thread à **son** moteur
+  (avant, deux tâches pouvaient tomber sur la même session ONNX en même temps).
+* `EngineFactory` : choix du moteur avec **auto-test** à la résolution de la tâche — RIFE appliqué à
+  une image et à elle-même doit rendre cette image (≥ 30 dB). Un pilote qui plante, renvoie des zéros
+  ou des NaN est écarté et la tâche passe au moteur suivant : GPU ncnn → CPU ncnn → ONNX Runtime.
+  Le mode « High quality » (ensemble) reste sur ONNX Runtime, seul à avoir ces poids.
+* Banc d'essai refait : GPU ×1/×2/×3, fp16 vs fp32, 4.9 vs 4.6, CPU ncnn, ONNX Runtime ; **chaque
+  sortie est comparée à la référence ONNX** (dB) et une configuration fausse ne peut pas gagner.
+  « Apply best » écrit moteur, modèle et fp16.
+
+**Validation (sur la VM, pas sur le téléphone)**
+
+| Mesure | Résultat |
+|---|---|
+| ncnn CPU vs ONNX Runtime, RIFE 4.9, 64×48 | 61,8 dB (identique) |
+| ncnn Vulkan (lavapipe) fp16 storage | 60,1 dB |
+| ncnn Vulkan, fp16 arithmetic | 50,5 dB (invisible) |
+| Vraies images 540×540 (Big Buck Bunny), ncnn 4.9 vs ONNX 4.9 | 63 dB |
+| Pool de 3 workers sur un moteur partagé | sortie identique au bit près |
+| CPU x86 2 cœurs, 540×540 : ONNX Runtime / ncnn 4.9 / ncnn 4.6 | ~470 / ~340 / ~250 ms |
+
+Les tests JVM (`NcnnRifeEngineTest`) pilotent la vraie bibliothèque JNI compilée pour l'hôte :
+
+```bash
+cd android
+NCNN_HOST=<ncnn-ubuntu> cmake -S native-test -B /tmp/hb -G Ninja && cmake --build /tmp/hb
+./gradlew testDebugUnitTest -PnativeTestLib=/tmp/hb     # sans -P, ces tests sont ignorés
+```
+
+Prévision pour un Snapdragon 8 Elite (Adreno 830) à 540×540, x4 : ~40-70 ms par inférence, soit
+**~5-8 images source/s** (estimation à partir du chiffre public ci-dessus, non mesurée ; le banc
+d'essai embarqué donne la vraie valeur). Le build NDK demande r30 (`ndkVersion` dans
+`app/build.gradle.kts`) : le prébuilt ncnn est compilé avec le libc++ de clang 21.
+
 ## Limites connues
 
 * Sortie **MP4 uniquement** (H.264 ou HEVC), pas de GIF/PNG/MKV.
@@ -398,6 +458,8 @@ Pistes suivantes, par ordre de rendement attendu :
 ## Crédits et licences
 
 * **FlowFrames** (n00mkrad) — concept et pipeline d'origine, licence GPL.
+* **ncnn** (Tencent) — moteur d'inférence GPU/CPU, licence BSD-3.
+* **rife-ncnn-vulkan** (nihui, modèles v4.x par TNTwise) — couche Warp et modèles ncnn, licence MIT.
 * **RIFE / Practical-RIFE** (hzwer et al.) — réseau d'interpolation, licence MIT.
 * Exports ONNX utilisés : `yuvraj108c/rife-onnx` et `ChimairrA/rife49_ensemble_False_scale_1_sim`
   (Hugging Face, licence MIT), conversions du modèle RIFE 4.9 de `hzwer/ECCV2022-RIFE`.

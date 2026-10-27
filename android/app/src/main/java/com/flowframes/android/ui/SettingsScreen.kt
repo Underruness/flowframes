@@ -37,6 +37,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.flowframes.android.core.Naming
 import com.flowframes.android.job.AiQuality
+import com.flowframes.android.job.EngineKind
+import com.flowframes.android.job.NcnnModel
 import com.flowframes.android.job.OutputCodec
 import com.flowframes.android.job.Settings
 import java.util.Locale
@@ -115,6 +117,51 @@ fun SettingsScreen(
             }
 
             Section("AI engine") {
+                Text("Runtime", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(EngineKind.AUTO to "Auto", EngineKind.NCNN_GPU to "GPU").forEach { (k, label) ->
+                        FilterChip(
+                            selected = settings.engine == k,
+                            onClick = { onChange { s -> s.copy(engine = k) } },
+                            label = { Text(label) }
+                        )
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(EngineKind.NCNN_CPU to "CPU (ncnn)", EngineKind.ORT_CPU to "CPU (ONNX)").forEach { (k, label) ->
+                        FilterChip(
+                            selected = settings.engine == k,
+                            onClick = { onChange { s -> s.copy(engine = k) } },
+                            label = { Text(label) }
+                        )
+                    }
+                }
+                Caption(
+                    "Auto runs RIFE on the GPU through Vulkan (ncnn, the engine of FlowFrames on PC) after a " +
+                        "self-test at the job's resolution, and falls back to the CPU if the driver fails it. " +
+                        "The old ONNX Runtime CPU engine stays available for comparison."
+                )
+
+                Text("ncnn model", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    NcnnModel.values().forEach { m ->
+                        FilterChip(
+                            selected = settings.ncnnModel == m,
+                            onClick = { onChange { s -> s.copy(ncnnModel = m) } },
+                            label = { Text(m.label) }
+                        )
+                    }
+                }
+                Caption("RIFE 4.9 is the same model as the ONNX engine. 4.6 is about 25% lighter, with slightly different results.")
+
+                SwitchRow(
+                    title = "fp16 arithmetic (ncnn)",
+                    description = "Half-precision math in the network: up to twice as fast on mobile GPUs. Measured " +
+                        "50 dB PSNR against full precision on RIFE 4.9 (invisible); the warp stays in full precision.",
+                    checked = settings.fp16,
+                    onCheckedChange = { v -> onChange { s -> s.copy(fp16 = v) } }
+                )
+
                 Text("Model quality", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(
@@ -128,7 +175,9 @@ fun SettingsScreen(
                         label = { Text("High quality") }
                     )
                 }
-                Caption("\"High quality\" runs RIFE in ensemble mode: fewer artefacts, roughly twice as slow.")
+                Caption("\"High quality\" runs RIFE in ensemble mode: fewer artefacts, roughly twice as slow, CPU only (ONNX Runtime).")
+
+                Text("ONNX Runtime options", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
 
                 SwitchRow(
                     title = "XNNPACK provider",
@@ -174,7 +223,7 @@ fun SettingsScreen(
                 Spacer(Modifier.height(4.dp))
                 Text(
                     "Parallel inferences: " +
-                        if (settings.workers == 0) "automatic" else "${settings.workers} at a time",
+                        if (settings.workers == 0) "automatic (2 on the GPU)" else "${settings.workers} at a time",
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 13.sp
                 )
@@ -357,7 +406,7 @@ fun SettingsScreen(
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "RIFE 4.9 models (MIT) · everything runs locally, nothing is uploaded.",
+                    "RIFE 4.9 / 4.6 models (MIT) · ncnn (BSD-3) · everything runs locally, nothing is uploaded.",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
