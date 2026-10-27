@@ -20,6 +20,63 @@ import java.util.Locale
 class JobCancelledException : Exception("Tâche annulée")
 
 /**
+ * Per-stage wall-clock accounting. Kept in the job log so a slow run can be diagnosed instead of
+ * guessed at: the model, the pixel conversions and the codecs have very different costs.
+ */
+private class StageTiming {
+    var decodeNs = 0L
+    var inferNs = 0L
+    var encodeNs = 0L
+    var inferCalls = 0
+
+    fun <T> decode(block: () -> T): T {
+        val t = System.nanoTime()
+        try {
+            return block()
+        } finally {
+            decodeNs += System.nanoTime() - t
+        }
+    }
+
+    fun <T> infer(block: () -> T): T {
+        val t = System.nanoTime()
+        try {
+            return block()
+        } finally {
+            inferNs += System.nanoTime() - t
+            inferCalls++
+        }
+    }
+
+    fun <T> encode(block: () -> T): T {
+        val t = System.nanoTime()
+        try {
+            return block()
+        } finally {
+            encodeNs += System.nanoTime() - t
+        }
+    }
+
+    /** Throughput so far, ignoring inference still running. */
+    fun rate(frames: Int): String {
+        val totalNs = decodeNs + inferNs + encodeNs
+        if (totalNs <= 0 || frames <= 0) return "–"
+        return String.format(Locale.US, "%.2f", frames / (totalNs / 1_000_000_000.0))
+    }
+
+    fun summary(frames: Int, outFrames: Int): String {
+        fun ms(v: Long) = String.format(Locale.US, "%.0f", v / 1_000_000.0)
+        val perInfer = if (inferCalls > 0) inferNs / 1_000_000.0 / inferCalls else 0.0
+        val totalNs = decodeNs + inferNs + encodeNs
+        val fps = if (totalNs > 0) frames / (totalNs / 1_000_000_000.0) else 0.0
+        return "Temps par étage: décodage ${ms(decodeNs)} ms · inférence ${ms(inferNs)} ms " +
+            "(${String.format(Locale.US, "%.0f", perInfer)} ms/image, $inferCalls images) · " +
+            "encodage ${ms(encodeNs)} ms → ${String.format(Locale.US, "%.2f", fps)} img source/s " +
+            "($outFrames images en sortie)"
+    }
+}
+
+/**
  * Full FlowFrames pipeline on device:
  * decode (MediaCodec) → RIFE interpolation (ONNX Runtime) → encode (MediaCodec) → mux (MediaMuxer).
  */
@@ -169,9 +226,7 @@ class Interpolator(
         var prevPlanar = FloatArray(pixels * 3)
         var curPlanar = FloatArray(pixels * 3)
         val midPlanar = FloatArray(pixels * 3)
-        val midArgb = IntArray(pixels)
 
-        var firstArgb: IntArray? = null
         var firstPlanar: FloatArray? = null
         var lastPts = 0L
         var firstPts = 0L
@@ -182,18 +237,22 @@ class Interpolator(
         var cuts = 0
         val phases = InterpPlan.phases(factor)
         val planOptions = settings.planOptions()
+        val timing = StageTiming()
         val expectedFrames = if (info.durationUs > 0) {
             (info.durationSeconds * srcFps).toInt().coerceAtLeast(1)
         } else 1000
 
         while (true) {
             checkCancelled()
-            val frame = decoder.decodeNext(cur) ?: break
-            FrameMath.argbToPlanar(cur, curPlanar)
+            val frame = timing.decode {
+                val f = decoder.decodeNext(cur) ?: return@decode null
+                FrameMath.argbToPlanar(cur, curPlanar)
+                f
+            } ?: break
             decoded++
 
             if (!havePrev) {
-                encoder.encode(cur, frame.ptsUs)
+                timing.encode { encoder.encodePlanar(curPlanar, frame.ptsUs) }
                 written++
                 System.arraycopy(cur, 0, prev, 0, pixels)
                 System.arraycopy(curPlanar, 0, prevPlanar, 0, pixels * 3)
@@ -201,7 +260,6 @@ class Interpolator(
                 lastPts = frame.ptsUs
                 havePrev = true
                 if (settings.loop) {
-                    firstArgb = cur.copyOf()
                     firstPlanar = curPlanar.copyOf()
                 }
                 onProgress(
@@ -211,8 +269,8 @@ class Interpolator(
                 continue
             }
 
-            val lumaDiff = FrameMath.meanAbsDiffLuma(prev, cur)
-            val changed = FrameMath.changedFractionLuma(prev, cur)
+            // One pass computes both metrics the dedupe/scene logic needs.
+            val (lumaDiff, changed) = FrameMath.lumaStats(prev, cur, 0.08)
             when (InterpPlan.decide(prev, cur, planOptions, lumaDiff, changed)) {
                 InterpPlan.Decision.SKIP_DUPLICATE -> {
                     skippedDuplicates++
@@ -221,7 +279,7 @@ class Interpolator(
 
                 InterpPlan.Decision.CUT -> {
                     cuts++
-                    encoder.encode(cur, frame.ptsUs)
+                    timing.encode { encoder.encodePlanar(curPlanar, frame.ptsUs) }
                     written++
                     adopt(cur, curPlanar, prev, prevPlanar, pixels)
                     lastPts = frame.ptsUs
@@ -231,13 +289,14 @@ class Interpolator(
                     val span = frame.ptsUs - lastPts
                     for (t in phases) {
                         checkCancelled()
-                        engine.interpolate(prevPlanar, curPlanar, width, height, t.toFloat(), midPlanar)
-                        FrameMath.planarToArgb(midPlanar, midArgb)
+                        timing.infer {
+                            engine.interpolate(prevPlanar, curPlanar, width, height, t.toFloat(), midPlanar)
+                        }
                         val pts = lastPts + (span * t).toLong()
-                        encoder.encode(midArgb, pts)
+                        timing.encode { encoder.encodePlanar(midPlanar, pts) }
                         written++
                     }
-                    encoder.encode(cur, frame.ptsUs)
+                    timing.encode { encoder.encodePlanar(curPlanar, frame.ptsUs) }
                     written++
                     adopt(cur, curPlanar, prev, prevPlanar, pixels)
                     lastPts = frame.ptsUs
@@ -246,28 +305,31 @@ class Interpolator(
 
             onProgress(
                 (0.98f * decoded / expectedFrames.toFloat()).coerceIn(0f, 0.98f),
-                "Image $decoded/$expectedFrames · $written en sortie"
+                "Image $decoded/$expectedFrames · $written en sortie · ${timing.rate(decoded)} img/s"
             )
         }
 
         if (skippedDuplicates > 0) log("Dé-duplication: $skippedDuplicates image(s) ignorée(s)")
         if (cuts > 0) log("Changements de scène: $cuts coupure(s) non interpolée(s)")
 
-        if (settings.loop && decoded > 1 && firstArgb != null && firstPlanar != null) {
+        val loopStart = firstPlanar
+        if (settings.loop && decoded > 1 && loopStart != null) {
             val avgSpan = if (decoded > 1) (lastPts - firstPts) / (decoded - 1) else 33_333L
             log("Interpolation de boucle (dernière → première image)")
             for (t in phases) {
                 checkCancelled()
-                engine.interpolate(prevPlanar, firstPlanar, width, height, t.toFloat(), midPlanar)
-                FrameMath.planarToArgb(midPlanar, midArgb)
-                encoder.encode(midArgb, lastPts + (avgSpan * t).toLong())
+                timing.infer {
+                    engine.interpolate(prevPlanar, loopStart, width, height, t.toFloat(), midPlanar)
+                }
+                timing.encode { encoder.encodePlanar(midPlanar, lastPts + (avgSpan * t).toLong()) }
                 written++
             }
-            encoder.encode(firstArgb, lastPts + avgSpan)
+            timing.encode { encoder.encodePlanar(loopStart, lastPts + avgSpan) }
             written++
         }
 
         if (decoded == 0) throw IllegalStateException("Aucune image décodée depuis cette vidéo")
+        log(timing.summary(decoded, written))
         return written
     }
 

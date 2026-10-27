@@ -30,6 +30,7 @@ class VideoEncoder(
     private val muxer = MediaMuxer(outputFd, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
     private val codec: MediaCodec
     private val bufferInfo = MediaCodec.BufferInfo()
+    private val scratch = YuvConverter.EncScratch()
     private val audioTrackIndex: Int
     private var videoTrackIndex = -1
     private var muxerStarted = false
@@ -111,19 +112,34 @@ class VideoEncoder(
 
     private var lastPtsUs = 0L
 
-    /** Encodes one frame. [argb] must be width*height pixels. */
+    /** Encodes one ARGB frame. [argb] must be width*height pixels. */
     fun encode(argb: IntArray, presentationTimeUs: Long) {
         lastPtsUs = presentationTimeUs
         val inIndex = dequeueInput()
-        val image = codec.getInputImage(inIndex)
-            ?: throw IllegalStateException(
-                "Cet appareil n'expose pas d'entrée YUV flexible pour l'encodeur (getInputImage = null)"
-            )
+        val image = codec.getInputImage(inIndex) ?: noInputImage()
         val frameSize = image.width * image.height * 3 / 2
         image.use { fillImage(it, argb) }
         codec.queueInputBuffer(inIndex, 0, frameSize, presentationTimeUs, 0)
         drain(false)
     }
+
+    /**
+     * Encodes one interpolated frame straight from planar RGB floats (CHW, [0,1]).
+     * Skips the ARGB round trip the engine output used to go through.
+     */
+    fun encodePlanar(planar: FloatArray, presentationTimeUs: Long) {
+        lastPtsUs = presentationTimeUs
+        val inIndex = dequeueInput()
+        val image = codec.getInputImage(inIndex) ?: noInputImage()
+        val frameSize = image.width * image.height * 3 / 2
+        image.use { fillImageFromPlanar(it, planar) }
+        codec.queueInputBuffer(inIndex, 0, frameSize, presentationTimeUs, 0)
+        drain(false)
+    }
+
+    private fun noInputImage(): Nothing = throw IllegalStateException(
+        "Cet appareil n'expose pas d'entrée YUV flexible pour l'encodeur (getInputImage = null)"
+    )
 
     /**
      * Queues the end-of-stream and flushes all remaining encoded samples.
@@ -179,7 +195,29 @@ class VideoEncoder(
             py.rowStride, pu.rowStride, pu.pixelStride,
             spec
         )
-        // Replicate the last row/column into any alignment padding so no garbage is encoded.
+        padImage(image)
+    }
+
+    private fun fillImageFromPlanar(image: android.media.Image, planar: FloatArray) {
+        val planes = image.planes
+        val py = planes[0]
+        val pu = planes[1]
+        val pv = planes[2]
+        YuvConverter.planarToYuv420(
+            planar, width, height,
+            py.buffer, pu.buffer, pv.buffer,
+            py.rowStride, pu.rowStride, pu.pixelStride,
+            spec, scratch
+        )
+        padImage(image)
+    }
+
+    /** Replicate the last row/column into any alignment padding so no garbage is encoded. */
+    private fun padImage(image: android.media.Image) {
+        val planes = image.planes
+        val py = planes[0]
+        val pu = planes[1]
+        val pv = planes[2]
         replicatePadding(py.buffer, image.width, image.height, py.rowStride, py.pixelStride)
         replicateChromaPadding(pu.buffer, image.width, image.height, pu.rowStride, pu.pixelStride)
         replicateChromaPadding(pv.buffer, image.width, image.height, pv.rowStride, pv.pixelStride)

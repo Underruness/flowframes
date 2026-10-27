@@ -149,6 +149,301 @@ object YuvConverter {
         }
     }
 
+    /**
+     * Decodes a YUV 4:2:0 image straight into an ARGB buffer of a different size and orientation.
+     *
+     * This replaces the old three-pass path (convert at full size, rotate, then bilinear resize) with
+     * a single pass that only touches the destination pixels: luma is point-sampled bilinearly from
+     * the source plane, chroma is taken from the nearest subsampled cell.
+     *
+     * @param rotation clockwise rotation in degrees (0, 90, 180, 270) applied to the source image
+     */
+    fun yuv420ToArgbScaled(
+        y: ByteBuffer, u: ByteBuffer, v: ByteBuffer,
+        yRowStride: Int, uvRowStride: Int, uvPixelStride: Int,
+        srcW: Int, srcH: Int,
+        dstW: Int, dstH: Int,
+        rotation: Int,
+        spec: Spec, out: IntArray,
+        scratch: PlaneScratch? = null
+    ) {
+        require(out.size >= dstW * dstH) { "output too small" }
+        val deg = ((rotation % 360) + 360) % 360
+        // Identity case: keep the exact same code path as the unscaled converter.
+        if (deg == 0 && dstW == srcW && dstH == srcH) {
+            yuv420ToArgb(y, u, v, yRowStride, uvRowStride, uvPixelStride, srcW, srcH, spec, out)
+            return
+        }
+        // ByteBuffer.get(index) costs a JNI-free but bounds-checked access each time (~6 ns).
+        // Copying the planes in bulk and then indexing plain arrays is several times faster.
+        val s = scratch ?: PlaneScratch()
+        val yPlane = s.luma(y, srcW, srcH, yRowStride)
+        val chromaRows = (srcH + 1) / 2
+        val uPlane = s.chroma(u, uvRowStride * chromaRows)
+        val vPlane = s.chromaV(v, uvRowStride * chromaRows)
+        val swapped = deg == 90 || deg == 270
+        val rotW = if (swapped) srcH else srcW
+        val rotH = if (swapped) srcW else srcH
+        val xScale = rotW.toFloat() / dstW
+        val yScale = rotH.toFloat() / dstH
+        val cw = (srcW + 1) / 2
+        val ch = (srcH + 1) / 2
+        val maxX = srcW - 1
+        val maxY = srcH - 1
+        val maxXF = maxX.toFloat()
+        val maxYF = maxY.toFloat()
+
+        // Rotated (rx, ry) -> source (sx, sy) is a linear map per rotation, written as coefficients so
+        // the per-pixel branch disappears from the inner loop.
+        val ax: Float; val bx: Float; val cx: Float
+        val ay: Float; val by: Float; val cy: Float
+        when (deg) {
+            90 -> { ax = 0f; bx = 0f; cx = 1f; ay = maxYF; by = -1f; cy = 0f }
+            180 -> { ax = maxXF; bx = -1f; cx = 0f; ay = maxYF; by = 0f; cy = -1f }
+            270 -> { ax = maxXF; bx = 0f; cx = -1f; ay = 0f; by = 1f; cy = 0f }
+            else -> { ax = 0f; bx = 1f; cx = 0f; ay = 0f; by = 0f; cy = 1f }
+        }
+
+        for (row in 0 until dstH) {
+            val ry = (row + 0.5f) * yScale - 0.5f
+            val outBase = row * dstW
+            for (col in 0 until dstW) {
+                val rx = (col + 0.5f) * xScale - 0.5f
+                var sxf = ax + bx * rx + cx * ry
+                var syf = ay + by * rx + cy * ry
+                if (sxf < 0f) sxf = 0f else if (sxf > maxXF) sxf = maxXF
+                if (syf < 0f) syf = 0f else if (syf > maxYF) syf = maxYF
+
+                val x0 = sxf.toInt()
+                val y0 = syf.toInt()
+                val fxs = sxf - x0
+                val fys = syf - y0
+                val x1 = if (x0 < maxX) x0 + 1 else maxX
+                val y1 = if (y0 < maxY) y0 + 1 else maxY
+                val r0 = y0 * srcW
+                val r1 = y1 * srcW
+                val l00 = (yPlane[r0 + x0].toInt() and 0xFF).toFloat()
+                val l10 = (yPlane[r0 + x1].toInt() and 0xFF).toFloat()
+                val l01 = (yPlane[r1 + x0].toInt() and 0xFF).toFloat()
+                val l11 = (yPlane[r1 + x1].toInt() and 0xFF).toFloat()
+                val top = l00 + (l10 - l00) * fxs
+                val bottom = l01 + (l11 - l01) * fxs
+                val luma = top + (bottom - top) * fys
+
+                val cu = ((x0 shr 1).coerceAtMost(cw - 1)) * uvPixelStride
+                val cv = (y0 shr 1).coerceAtMost(ch - 1)
+                val uvIdx = cv * uvRowStride + cu
+                var uu = 0
+                var vv = 0
+                if (uvIdx >= 0 && uvIdx < uPlane.size) {
+                    uu = (uPlane[uvIdx].toInt() and 0xFF) - 128
+                    vv = (vPlane[uvIdx].toInt() and 0xFF) - 128
+                }
+
+                // Integer maths, same shape as yuv420ToArgb: float divisions per pixel were expensive.
+                val yInt = (luma * spec.yMul + spec.yOff + 0.5f).toInt()
+                val r = (yInt + spec.cr * vv + 128) shr 8
+                val g = (yInt - spec.cgu * uu - spec.cgv * vv + 128) shr 8
+                val b = (yInt + spec.cb * uu + 128) shr 8
+                out[outBase + col] = (0xFF shl 24) or
+                    (clamp(r) shl 16) or (clamp(g) shl 8) or clamp(b)
+            }
+        }
+    }
+
+    /**
+     * Writes planar RGB floats in [0,1] (CHW, as returned by the RIFE model) straight into YUV 4:2:0
+     * planes. Saves the intermediate ARGB frame the encoder used to require.
+     */
+    fun planarToYuv420(
+        planar: FloatArray, width: Int, height: Int,
+        y: ByteBuffer, u: ByteBuffer, v: ByteBuffer,
+        yRowStride: Int, uvRowStride: Int, uvPixelStride: Int,
+        spec: Spec,
+        scratch: EncScratch? = null
+    ) {
+        val n = width * height
+        require(planar.size >= n * 3) { "planar buffer too small" }
+        val eY = spec.eY
+        val eU = spec.eU
+        val eV = spec.eV
+        val yOff = spec.encYOff
+        val uvOff = spec.encUvOff
+        val cw = (width + 1) / 2
+        val ch = (height + 1) / 2
+
+        // Convert into packed arrays, then write whole rows: per-pixel ByteBuffer.put() calls were
+        // the dominant cost of this stage.
+        val s = scratch ?: EncScratch()
+        val yPlane = s.luma(n)
+        val uPlane = s.chroma(cw * ch, false)
+        val vPlane = s.chroma(cw * ch, true)
+
+        for (row in 0 until height) {
+            val base = row * width
+            val gBase = n + base
+            val bBase = n * 2 + base
+            for (col in 0 until width) {
+                val k = base + col
+                val r = toByteChannel(planar[k])
+                val g = toByteChannel(planar[gBase + col])
+                val b = toByteChannel(planar[bBase + col])
+                yPlane[k] = clamp(((eY[0] * r + eY[1] * g + eY[2] * b + 128) shr 8) + yOff).toByte()
+            }
+        }
+
+        var row = 0
+        while (row < height) {
+            val cRow = row shr 1
+            val uvBase = cRow * uvRowStride
+            var col = 0
+            while (col < width) {
+                var rSum = 0
+                var gSum = 0
+                var bSum = 0
+                var count = 0
+                for (dy in 0..1) {
+                    val yy = row + dy
+                    if (yy >= height) break
+                    val base = yy * width
+                    val gBase = n + base
+                    val bBase = n * 2 + base
+                    for (dx in 0..1) {
+                        val xx = col + dx
+                        if (xx >= width) break
+                        rSum += toByteChannel(planar[base + xx])
+                        gSum += toByteChannel(planar[gBase + xx])
+                        bSum += toByteChannel(planar[bBase + xx])
+                        count++
+                    }
+                }
+                if (count > 0) {
+                    val r = rSum / count
+                    val g = gSum / count
+                    val b = bSum / count
+                    val cell = cRow * cw + (col shr 1)
+                    uPlane[cell] = clamp(((eU[0] * r + eU[1] * g + eU[2] * b + 128) shr 8) + uvOff).toByte()
+                    vPlane[cell] = clamp(((eV[0] * r + eV[1] * g + eV[2] * b + 128) shr 8) + uvOff).toByte()
+                }
+                col += 2
+            }
+            row += 2
+        }
+
+        writeRows(y, yPlane, height, yRowStride, width, width)
+        if (uvPixelStride >= 2) {
+            // Semi-planar (NV12/NV21): U and V are interleaved in a single buffer. Writing the pairs
+            // into the U plane covers both, so the V plane is left untouched.
+            val interleaved = ByteArray(minOf(uvRowStride, cw * 2))
+            val dst = u.duplicate()
+            dst.position(0)
+            dst.limit(dst.capacity())
+            for (cRow in 0 until ch) {
+                val start = cRow * uvRowStride
+                if (start >= dst.capacity()) break
+                val pairCount = minOf(cw, interleaved.size / 2)
+                for (col in 0 until pairCount) {
+                    interleaved[col * 2] = uPlane[cRow * cw + col]
+                    interleaved[col * 2 + 1] = vPlane[cRow * cw + col]
+                }
+                val end = minOf(start + pairCount * 2, dst.capacity())
+                dst.position(start)
+                dst.limit(end)
+                dst.put(interleaved, 0, end - start)
+            }
+        } else {
+            writeRows(u, uPlane, ch, uvRowStride, cw, cw)
+            writeRows(v, vPlane, ch, uvRowStride, cw, cw)
+        }
+    }
+
+    private fun writeRows(
+        dst: ByteBuffer, src: ByteArray, rows: Int, rowStride: Int, width: Int, packedWidth: Int
+    ) {
+        val out = dst.duplicate()
+        for (row in 0 until rows) {
+            val start = row * rowStride
+            if (start >= out.capacity()) break
+            val end = minOf(start + width, out.capacity())
+            out.position(start)
+            out.limit(end)
+            out.put(src, row * packedWidth, end - start)
+        }
+    }
+
+    /** Reusable packed Y/U/V buffers for the encode path. */
+    class EncScratch {
+        private var yBuf = ByteArray(0)
+        private var uBuf = ByteArray(0)
+        private var vBuf = ByteArray(0)
+
+        fun luma(size: Int): ByteArray {
+            if (yBuf.size < size) yBuf = ByteArray(size)
+            return yBuf
+        }
+
+        fun chroma(size: Int, second: Boolean): ByteArray {
+            if (second) {
+                if (vBuf.size < size) vBuf = ByteArray(size)
+                return vBuf
+            }
+            if (uBuf.size < size) uBuf = ByteArray(size)
+            return uBuf
+        }
+    }
+
+    /** Reusable plane copies so the fused decode path does not allocate per frame. */
+    class PlaneScratch {
+        private var yBuf: ByteArray = ByteArray(0)
+        private var uvBuf: ByteArray = ByteArray(0)
+        private var vBuf: ByteArray = ByteArray(0)
+
+        /** Luma plane packed without row padding, `width * height` bytes. */
+        fun luma(src: ByteBuffer, width: Int, height: Int, rowStride: Int): ByteArray {
+            val need = width * height
+            if (yBuf.size < need) yBuf = ByteArray(need)
+            val out = yBuf
+            val dup = src.duplicate()
+            val capacity = dup.capacity()
+            for (row in 0 until height) {
+                val start = row * rowStride
+                if (start >= capacity) break
+                val end = minOf(start + width, capacity)
+                dup.position(start)
+                dup.limit(end)
+                dup.get(out, row * width, end - start)
+            }
+            return out
+        }
+
+        /** Raw chroma plane, padding included so indices match the source layout. */
+        fun chroma(src: ByteBuffer, bytes: Int): ByteArray {
+            if (uvBuf.size < bytes) uvBuf = ByteArray(bytes)
+            val dup = src.duplicate()
+            dup.position(0)
+            dup.limit(dup.capacity())
+            val n = minOf(bytes, dup.remaining())
+            dup.get(uvBuf, 0, n)
+            return uvBuf
+        }
+
+        /** Raw V plane (kept separate from [chroma]'s buffer). */
+        fun chromaV(src: ByteBuffer, bytes: Int): ByteArray {
+            if (vBuf.size < bytes) vBuf = ByteArray(bytes)
+            val dup = src.duplicate()
+            dup.position(0)
+            dup.limit(dup.capacity())
+            val n = minOf(bytes, dup.remaining())
+            dup.get(vBuf, 0, n)
+            return vBuf
+        }
+    }
+
+    private fun toByteChannel(v: Float): Int {
+        val x = (v * 255f + 0.5f).toInt()
+        return if (x < 0) 0 else if (x > 255) 255 else x
+    }
+
     private fun clamp(v: Int): Int = if (v < 0) 0 else if (v > 255) 255 else v
 
     private fun clamp(v: Byte): Byte = v

@@ -4,7 +4,6 @@ import android.media.Image
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
-import com.flowframes.android.core.FrameMath
 import com.flowframes.android.core.YuvConverter
 
 /**
@@ -27,12 +26,12 @@ class VideoDecoder(
     private val bufferInfo = MediaCodec.BufferInfo()
 
     private var spec: YuvConverter.Spec = initialSpec
+    private val scratch = YuvConverter.PlaneScratch()
     private var inputDone = false
     private var outputDone = false
     private var started = false
     private var codedWidth = 0
     private var codedHeight = 0
-    private var coded: IntArray = IntArray(0)
     private var lastPtsUs = -1L
 
     private val trackIndex: Int
@@ -60,7 +59,6 @@ class VideoDecoder(
         started = true
         codedWidth = format.getInteger(MediaFormat.KEY_WIDTH)
         codedHeight = format.getInteger(MediaFormat.KEY_HEIGHT)
-        coded = IntArray(codedWidth * codedHeight)
         log("Décodeur: $mime ${codedWidth}x$codedHeight (rotation $rotation°, couleur ${spec.label})")
     }
 
@@ -76,7 +74,6 @@ class VideoDecoder(
                     val f = codec.outputFormat
                     codedWidth = f.getInteger(MediaFormat.KEY_WIDTH)
                     codedHeight = f.getInteger(MediaFormat.KEY_HEIGHT)
-                    coded = IntArray(codedWidth * codedHeight)
                     spec = VideoInfo.colorSpecFor(f, codedHeight)
                 }
 
@@ -125,28 +122,23 @@ class VideoDecoder(
         }
     }
 
+    /**
+     * One pass: YUV planes -> rotated + scaled ARGB, written straight into [out].
+     * The previous code converted at full source size, rotated into a fresh array and then resized
+     * into another one, which cost ~70 ms per 1080p frame.
+     */
     private fun copyImageToArgb(image: Image, out: IntArray) {
-        val w = image.width
-        val h = image.height
-        if (w != codedWidth || h != codedHeight || coded.size < w * h) {
-            codedWidth = w
-            codedHeight = h
-            coded = IntArray(w * h)
-        }
         val planes = image.planes
         val y = planes[0]
         val u = planes[1]
         val v = planes[2]
-        YuvConverter.yuv420ToArgb(
+        YuvConverter.yuv420ToArgbScaled(
             y.buffer, u.buffer, v.buffer,
             y.rowStride, u.rowStride, u.pixelStride,
-            w, h, spec, coded
+            image.width, image.height,
+            targetWidth, targetHeight,
+            rotation, spec, out, scratch
         )
-        val rotated = FrameMath.rotateArgb(coded, w, h, rotation)
-        val scaled = FrameMath.resizeArgb(rotated.pixels, rotated.width, rotated.height, targetWidth, targetHeight)
-        if (scaled.size >= targetWidth * targetHeight) {
-            System.arraycopy(scaled, 0, out, 0, targetWidth * targetHeight)
-        }
     }
 
     val lastPts: Long get() = lastPtsUs

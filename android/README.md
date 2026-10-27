@@ -173,10 +173,52 @@ l'environnement de développement ; à lancer sur un appareil :
 
 ### Signature
 
-`android/keystore.properties` + `app/keystore/flowframes.jks` contiennent une clé **auto-signée
-de test** (mot de passe `flowframes`) destinée à l'installation manuelle. Elle est versionnée
-volontairement pour que les reconstructions s'installent par-dessus l'application existante.
-Remplacez-la par votre propre clé pour une diffusion publique.
+`android/keystore.properties` + `app/keystore/flowframes.jks` contiennent une clé auto-signée
+locale. **Ils ne sont pas versionnés** (voir `.gitignore`) : un secret de signature n'a rien à faire
+dans un dépôt public. Sans ces fichiers, `assembleRelease` produit une APK signée avec la clé de
+debug — elle fonctionne, mais Android refusera de l'installer par-dessus une APK signée avec une
+autre clé (erreur `INSTALL_FAILED_UPDATE_INCOMPATIBLE`). Pour conserver la mise à jour par-dessus
+l'application déjà installée, gardez la même keystore d'une reconstruction à l'autre.
+
+## Performances
+
+Coût des étapes non liées au modèle, pour une image 1280×720 (mesures JVM sur la VM de
+développement x86, `FF_BENCH=1 ./gradlew testDebugUnitTest --tests "*PerfProbeTest"`) :
+
+| Étape | Avant | Après |
+|---|---|---|
+| Décodage 1080p → 720p (YUV + rotation + redimensionnement) | 51 ms | 29 ms |
+| Détection doublons / changements de plan | 1,8 ms (2 passes) | 1,1 ms (1 passe) |
+| Sortie interpolée (planar → YUV encodeur) | 9,5 ms | 8,2 ms |
+| Allocation par pixel dans le redimensionnement bilinéaire | 1 `IntArray`/pixel | aucune |
+
+Ce qui a changé :
+
+* Le décodage fait conversion YUV, rotation et redimensionnement en **une seule passe** qui ne
+touche que les pixels de destination, au lieu de trois passes pleine résolution avec deux tableaux
+intermédiaires alloués par image.
+* Les plans YUV sont copiés en bloc vers des tableaux réutilisés : `ByteBuffer.get(index)` coûtait
+~6 ns par accès et il y en avait six par pixel.
+* Les images interpolées sont écrites **directement en YUV** pour l'encodeur, sans repasser par une
+image ARGB.
+* Les deux métriques de dé-duplication sont calculées en une passe.
+* L'inférence utilise par défaut tous les cœurs (8 sur un SoC récent) au lieu d'en réserver deux.
+
+**L'inférence RIFE reste le poste dominant** : ~800 ms/image à 720p sur cette VM x86 (sans
+XNNPACK, qui n'existe pas dans le jar desktop), quelques centaines de ms sur un SoC mobile où
+XNNPACK est actif. Chaque tâche journalise désormais le temps réel par étage
+(`Temps par étage: décodage … · inférence … · encodage …`) : c'est la mesure à lire avant de
+chercher ailleurs.
+
+Pistes écartées, avec la raison :
+
+* **Quantification INT8** : rejetée par la mesure. `tools/quantize_rife.py` quantifie le modèle en
+  QDQ et compare au FP32 ; le PSNR tombe à 12,6 dB au pire des cas pour un seuil fixé à 33 dB.
+  RIFE (GridNet, nombreuses concaténations) ne supporte pas l'int8 sans entraînement spécifique.
+* **Formes fixes pour XNNPACK** : `addFreeDimensionOverride` n'est pas exposé par ONNX Runtime
+  1.19.2 côté Java (`javap` sur l'AAR le confirme).
+* **NNAPI** : l'option existe dans les réglages, mais NNAPI est déprécié depuis Android 15 et son
+  gain est très variable selon le pilote du constructeur. Ce n'est pas activé par défaut.
 
 ## Limites connues
 

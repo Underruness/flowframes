@@ -156,9 +156,12 @@ class RifeEngine(
     }
 
     companion object {
-        /** Default worker threads: leave one or two cores for the decoder/encoder. */
+        /**
+         * Default worker threads. The decoder and encoder are hardware blocks that mostly sleep, so
+         * using nearly every core for inference is faster than reserving two of them.
+         */
         fun defaultThreads(): Int = Runtime.getRuntime().availableProcessors().let {
-            if (it <= 2) 1 else (it - 2).coerceAtMost(6)
+            if (it <= 2) 1 else it.coerceAtMost(8)
         }
     }
 }
