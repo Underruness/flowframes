@@ -1,9 +1,11 @@
 name: Android UI tests
 
 # Runs the instrumented Compose smoke tests (FlowFrames + Capri) on a real Android emulator, so a
-# release never ships an UI that does not even inflate. The emulator runs on a Linux runner with
-# KVM, which is the only place these tests can run: the build machine used for the APKs has no
-# hardware acceleration and no emulator package.
+# release never ships an UI that does not even inflate. The emulator needs KVM: the machine that
+# builds the APKs has none (and no emulator package), so these tests can only run here.
+#
+# Every emulator step is written out by hand instead of using a third-party action, so that a
+# failure points at the exact command in the run summary.
 on:
   push:
     branches: ['main', 'android-*', 'release/android-*']
@@ -15,10 +17,16 @@ on:
 permissions:
   contents: read
 
+env:
+  API_LEVEL: 34
+  IMAGE_TARGET: google_apis
+  IMAGE_ARCH: x86_64
+  AVD_NAME: ci34
+
 jobs:
   ui-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-java@v5
@@ -26,36 +34,72 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install NDK r30, CMake, platform and build tools
-        run: |
-          SDKM=$(ls -d $ANDROID_HOME/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)
-          yes | $SDKM --licenses > /dev/null || true
-          $SDKM "ndk;30.0.16248370" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0" > /dev/null
-          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
-
-      # The emulator images are x86_64, so the native engine is built for x86_64 as well: a single
-      # APK can only carry one ABI, and an arm64 APK cannot be installed on an x86_64 emulator.
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+          $ANDROID_HOME/emulator/emulator -accel-check || true
 
-      - name: Instrumented UI smoke tests (FlowFrames + Capri)
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          arch: x86_64
-          target: google_apis
-          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          disable-animations: true
-          script: |
-            cd android
-            chmod +x gradlew
-            ./gradlew --no-daemon connectedFlowframesDebugAndroidTest connectedCapriDebugAndroidTest \
-              -Pabis=x86_64 \
-              -Pandroid.testInstrumentationRunnerArguments.class=com.flowframes.android.UiSmokeTest
+      - name: Install the SDK pieces and the emulator image
+        run: |
+          SDKM=$(ls -d $ANDROID_HOME/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)
+          yes | $SDKM --licenses > /dev/null || true
+          $SDKM "ndk;30.0.16248370" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0" \
+            "emulator" "system-images;android-$API_LEVEL;$IMAGE_TARGET;$IMAGE_ARCH"
+          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
+          df -h / | tail -1
+
+      - name: Create the AVD
+        run: |
+          AVDM=$(ls -d $ANDROID_HOME/cmdline-tools/*/bin/avdmanager | sort -V | tail -1)
+          IMAGE="system-images;android-$API_LEVEL;$IMAGE_TARGET;$IMAGE_ARCH"
+          echo no | $AVDM create avd -n "$AVD_NAME" -k "$IMAGE" -d pixel_5 --force \
+            || echo no | $AVDM create avd -n "$AVD_NAME" -k "$IMAGE" --force
+          # 2 GB of RAM and an SD card: Compose plus MediaCodec are heavier than the default profile.
+          printf 'hw.ramSize=2048\nhw.keyboard=yes\ndisk.dataPartition.size=4096M\n' \
+            >> "$HOME/.android/avd/$AVD_NAME.avd/config.ini"
+          grep -E 'hw.ramSize|hw.keyboard|image.sysdir|hw.lcd' "$HOME/.android/avd/$AVD_NAME.avd/config.ini" || true
+
+      - name: Boot the emulator
+        run: |
+          nohup $ANDROID_HOME/emulator/emulator -avd "$AVD_NAME" -no-window -no-audio -no-boot-anim \
+            -no-snapshot -gpu swiftshader_indirect -camera-back none -camera-front none \
+            > /tmp/emulator.log 2>&1 &
+          adb wait-for-device
+          boot=""
+          for i in $(seq 1 120); do
+            boot=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            [ "$boot" = "1" ] && break
+            sleep 5
+          done
+          echo "sys.boot_completed=$boot"
+          adb shell getprop ro.build.version.sdk
+          for s in window_animation_scale transition_animation_scale animator_duration_scale; do
+            adb shell settings put global $s 0
+          done
+          adb devices
+          test "$boot" = "1"
+
+      # The emulator images are x86_64, so the native engine is built for x86_64 too: one APK carries
+      # one ABI, and the arm64 APK shipped to users cannot be installed on an x86_64 emulator.
+      - name: Run the instrumented UI smoke tests
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew --no-daemon connectedFlowframesDebugAndroidTest connectedCapriDebugAndroidTest \
+            -Pabis=x86_64 \
+            -Pandroid.testInstrumentationRunnerArguments.class=com.flowframes.android.UiSmokeTest
+
+      - name: Emulator and device logs
+        if: always()
+        run: |
+          echo "=== emulator.log (tail) ==="
+          tail -80 /tmp/emulator.log || true
+          echo "=== logcat (tail) ==="
+          adb logcat -d -t 300 || true
 
       - name: Upload the test reports
         if: always()
