@@ -1,0 +1,66 @@
+name: Android UI tests
+
+# Runs the instrumented Compose smoke tests (FlowFrames + Capri) on a real Android emulator, so a
+# release never ships an UI that does not even inflate. The emulator runs on a Linux runner with
+# KVM, which is the only place these tests can run: the build machine used for the APKs has no
+# hardware acceleration and no emulator package.
+on:
+  push:
+    branches: ['main', 'android-*', 'release/android-*']
+    paths:
+      - 'android/**'
+      - '.github/workflows/android-ui-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ui-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install NDK r30, CMake, platform and build tools
+        run: |
+          SDKM=$(ls -d $ANDROID_HOME/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)
+          yes | $SDKM --licenses > /dev/null || true
+          $SDKM "ndk;30.0.16248370" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0" > /dev/null
+          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
+
+      # The emulator images are x86_64, so the native engine is built for x86_64 as well: a single
+      # APK can only carry one ABI, and an arm64 APK cannot be installed on an x86_64 emulator.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Instrumented UI smoke tests (FlowFrames + Capri)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: |
+            cd android
+            chmod +x gradlew
+            ./gradlew --no-daemon connectedFlowframesDebugAndroidTest connectedCapriDebugAndroidTest \
+              -Pabis=x86_64 \
+              -Pandroid.testInstrumentationRunnerArguments.class=com.flowframes.android.UiSmokeTest
+
+      - name: Upload the test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-ui-test-reports
+          path: android/app/build/reports/androidTests/connected/**
+          if-no-files-found: ignore
