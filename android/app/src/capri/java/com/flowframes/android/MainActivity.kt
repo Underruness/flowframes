@@ -41,6 +41,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -182,7 +183,7 @@ class MainActivity : ComponentActivity() {
 
         Scaffold(
             bottomBar = {
-                NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+                NavigationBar(containerColor = Color.Black) {
                     NavigationBarItem(
                         selected = tab == Tab.STUDIO,
                         onClick = { tab = Tab.STUDIO },
@@ -216,7 +217,6 @@ class MainActivity : ComponentActivity() {
                         onAdd = { addLauncher.launch(arrayOf("video/*")) },
                         onStart = { InterpolationService.start(this@MainActivity) },
                         onCancel = { InterpolationService.cancel(this@MainActivity) },
-                        onClearFinished = { AppGraph.jobs.clearFinished() },
                         onCopyLogs = copyLogs,
                         onShareLogs = shareLogs,
                         onRemove = { id -> AppGraph.jobs.remove(id) }
