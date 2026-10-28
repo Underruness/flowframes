@@ -95,10 +95,11 @@ jobs:
 
             * **FlowFrames-Android.apk** — l'application historique : interpolation RIFE sur le GPU via
               ncnn + Vulkan, repli automatique sur le CPU si le pilote échoue.
-            * **Capri-Android.apk** — la nouvelle édition : interface Material You (couleurs dynamiques
-              du fond d'écran sur Android 12+, animations, nouveau logo), mêmes moteurs et mêmes
-              réglages. Elle s'installe à côté de FlowFrames (identifiant distinct), les deux peuvent
-              donc coexister.
+            * **Capri-Android.apk** — l'édition Capri : la palette du personnage (noir, rose vif, vert
+              néon du masque, bleu électrique des yeux, paillettes blanches), logo et icônes redessinés,
+              police Chakra Petch, en-tête fin de 64 dp et file d'attente qui ne se chevauche plus sur un
+              petit écran. Mêmes moteurs et mêmes réglages ; elle s'installe à côté de FlowFrames
+              (identifiant distinct), les deux peuvent donc coexister.
 
             Les deux APK sont signés (v1 + v2 + v3, compatible avec l'installateur Honor) avec la clé de
             release FlowFrames : inutile de les re-signer. Désinstaller une fois l'ancienne version si
@@ -108,3 +109,9 @@ jobs:
             lancement compile les shaders et convertit les poids en arrière-plan, puis chaque
             interpolation démarre immédiatement. Les inférences parallèles se règlent avec un curseur
             (2 par défaut).
+
+            Nouveau en 1.7.0 : les trois conversions de pixels de chaque image générée (deux entrées ARGB,
+            une sortie) sont réparties sur plusieurs threads au lieu de s'enchaîner — 58 % de ce coût CPU
+            en moins en 1080p, 68 % en 4K (mesuré sur machine hôte, sur les boucles exactes du téléphone).
+            Les tests d'interface des deux éditions tournent désormais sur un émulateur Android à chaque
+            poussée.
