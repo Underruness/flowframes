@@ -4,8 +4,9 @@ name: Android UI tests
 # release never ships an UI that does not even inflate. The emulator needs KVM: the machine that
 # builds the APKs has none (and no emulator package), so these tests can only run here.
 #
-# Every emulator step is written out by hand instead of using a third-party action, so that a
-# failure points at the exact command in the run summary.
+# Every emulator step is written out by hand instead of using a third-party action, and the commands
+# that can fail report their own output as a check annotation: a workflow run is readable without
+# authentication, its logs are not, and "exit code 1" alone says nothing about what broke.
 on:
   push:
     branches: ['main', 'android-*', 'release/android-*']
@@ -40,8 +41,8 @@ jobs:
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-          ls -l /dev/kvm
-          $ANDROID_HOME/emulator/emulator -accel-check || true
+          accel=$($ANDROID_HOME/emulator/emulator -accel-check 2>&1 | tr '\n' ' ' || true)
+          echo "::notice title=KVM::$(ls -l /dev/kvm 2>&1 | tr '\n' ' ') — accel-check: $accel"
 
       - name: Install the SDK pieces and the emulator image
         run: |
@@ -56,12 +57,26 @@ jobs:
         run: |
           AVDM=$(ls -d $ANDROID_HOME/cmdline-tools/*/bin/avdmanager | sort -V | tail -1)
           IMAGE="system-images;android-$API_LEVEL;$IMAGE_TARGET;$IMAGE_ARCH"
-          echo no | $AVDM create avd -n "$AVD_NAME" -k "$IMAGE" -d pixel_5 --force \
-            || echo no | $AVDM create avd -n "$AVD_NAME" -k "$IMAGE" --force
-          # 2 GB of RAM and an SD card: Compose plus MediaCodec are heavier than the default profile.
+          mkdir -p "$HOME/.android/avd"
+          created=0
+          for extra in "-d pixel_5" ""; do
+            if out=$(echo no | $AVDM create avd -n "$AVD_NAME" -k "$IMAGE" $extra --force 2>&1); then
+              echo "$out"
+              echo "::notice title=AVD::créé avec [$extra]"
+              created=1
+              break
+            fi
+            echo "::error title=avdmanager [$extra]::$(echo "$out" | tr '\n' '|' | head -c 800)"
+          done
+          if [ "$created" != "1" ]; then
+            echo "::error title=AVD::creation impossible — $(ls -la $ANDROID_HOME 2>&1 | tr '\n' '|' | head -c 400)"
+            exit 1
+          fi
+          # 2 GB of RAM: Compose plus MediaCodec are heavier than the default profile.
           printf 'hw.ramSize=2048\nhw.keyboard=yes\ndisk.dataPartition.size=4096M\n' \
             >> "$HOME/.android/avd/$AVD_NAME.avd/config.ini"
-          grep -E 'hw.ramSize|hw.keyboard|image.sysdir|hw.lcd' "$HOME/.android/avd/$AVD_NAME.avd/config.ini" || true
+          echo "::notice title=avd config::$(grep -E 'hw.ramSize|hw.keyboard|image.sysdir|hw.lcd.width' \
+            "$HOME/.android/avd/$AVD_NAME.avd/config.ini" | tr '\n' ' ')"
 
       - name: Boot the emulator
         run: |
@@ -75,13 +90,12 @@ jobs:
             [ "$boot" = "1" ] && break
             sleep 5
           done
-          echo "sys.boot_completed=$boot"
-          adb shell getprop ro.build.version.sdk
-          for s in window_animation_scale transition_animation_scale animator_duration_scale; do
-            adb shell settings put global $s 0
-          done
           adb devices
-          test "$boot" = "1"
+          echo "::notice title=boot::sys.boot_completed=$boot"
+          if [ "$boot" != "1" ]; then
+            echo "::error title=émulateur::$(tail -25 /tmp/emulator.log | tr '\n' '|' | head -c 900)"
+            exit 1
+          fi
 
       # The emulator images are x86_64, so the native engine is built for x86_64 too: one APK carries
       # one ABI, and the arm64 APK shipped to users cannot be installed on an x86_64 emulator.
@@ -89,9 +103,18 @@ jobs:
         run: |
           cd android
           chmod +x gradlew
+          set +e
           ./gradlew --no-daemon connectedFlowframesDebugAndroidTest connectedCapriDebugAndroidTest \
             -Pabis=x86_64 \
-            -Pandroid.testInstrumentationRunnerArguments.class=com.flowframes.android.UiSmokeTest
+            -Pandroid.testInstrumentationRunnerArguments.class=com.flowframes.android.UiSmokeTest \
+            > /tmp/gradle-tests.log 2>&1
+          code=$?
+          tail -60 /tmp/gradle-tests.log
+          if [ "$code" != "0" ]; then
+            echo "::error title=tests UI::$(grep -E 'FAILED|failed|AssertionError|Error|error:' /tmp/gradle-tests.log \
+              | head -12 | tr '\n' '|' | head -c 900)"
+          fi
+          exit $code
 
       - name: Emulator and device logs
         if: always()
@@ -106,5 +129,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: android-ui-test-reports
-          path: android/app/build/reports/androidTests/connected/**
+          path: |
+            android/app/build/reports/androidTests/connected/**
+            /tmp/gradle-tests.log
           if-no-files-found: ignore
