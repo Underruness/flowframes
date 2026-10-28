@@ -3,33 +3,12 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Nothing but the face: the mask band, the two ringed eyes and the zigzag mouth, in one
-         single colour, so the launcher can tint it with the wallpaper palette. -->
     <path
+        android:pathData="M74,33 A28,28 0 1 0 74,75"
         android:strokeColor="#FFFFFF"
-        android:strokeWidth="4.5"
-        android:strokeLineCap="round"
-        android:pathData="M17,50 L91,55 L86,71 L21,67 Z" />
-    <path
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="4.5"
-        android:pathData="M40,60 m-10,0 a10,10 0 1,0 20,0 a10,10 0 1,0 -20,0" />
+        android:strokeWidth="9"
+        android:strokeLineCap="round" />
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M40,60 m-4.4,0 a4.4,4.4 0 1,0 8.8,0 a4.4,4.4 0 1,0 -8.8,0" />
-    <path
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="4"
-        android:pathData="M71,62 m-7,0 a7,7 0 1,0 14,0 a7,7 0 1,0 -14,0" />
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M71,62 m-3,0 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0" />
-    <path
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="4"
-        android:strokeLineCap="round"
-        android:pathData="M42,80 L48,74 L54,83 L60,76 L66,81" />
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M54,12 L60,24 L48,24 Z" />
+        android:pathData="M45,40 L69,54 L45,68 Z" />
 </vector>

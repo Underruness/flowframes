@@ -646,6 +646,25 @@ lanceur compile le moteur natif x86_64 puis exécute le `UiSmokeTest` des deux �
 émulateur Android 34, ce qui aurait attrapé un écran qui ne s'affiche pas avant de publier. Les
 échecs remontent en annotations, les logs d'un run n'étant pas lisibles sans authentification.
 
+### Version 1.7.1 — retour à l'interface Capri de la 1.6.6
+
+L'identité de la 1.7.0 (palette du personnage, masque et yeux dessinés, police Chakra Petch) ne
+convient pas : l'interface revient à celle de la 1.6.6 — palette Material You du système (couleurs
+tirées du fond d'écran sur Android 12+), logo et icônes d'alors, cartes arrondies et anneau de
+progression. Seuls les deux défauts du menu principal sont corrigés :
+
+- **En-tête fin.** La bannière dégradée animée passe d'environ 180 dp à environ 80 dp : deux lignes
+  (le logo, « CAPRI », le modèle ; puis les réglages et l'état du GPU sur une seule ligne), plus de
+  rangée de pastilles ni de grand bloc lumineux au-dessus de la file.
+- **Plus de texte qui se chevauche.** Le nom d'un fichier avait sa ligne partagée avec la pastille
+d'état et le bouton de suppression : sur un écran étroit, le nom passait sous la pastille. Désormais
+  le nom occupe sa propre ligne (seul le bouton de suppression le côtoie), l'état et les métadonnées
+  tiennent sur la ligne suivante et sont tronqués par des points de suspension, et les deux boutons
+  du bas se partagent la largeur au lieu de déborder.
+
+Le moteur de la 1.7.0 (conversions de pixels parallèles) et la préparation GPU au démarrage sont
+conservés : cette version ne change que l'habillage.
+
 ## Crédits et licences
 
 * **FlowFrames** (n00mkrad) — concept et pipeline d'origine, licence GPL.
@@ -655,5 +674,3 @@ lanceur compile le moteur natif x86_64 puis exécute le `UiSmokeTest` des deux �
 * Exports ONNX utilisés : `yuvraj108c/rife-onnx` et `ChimairrA/rife49_ensemble_False_scale_1_sim`
   (Hugging Face, licence MIT), conversions du modèle RIFE 4.9 de `hzwer/ECCV2022-RIFE`.
 * **ONNX Runtime** (Microsoft, licence MIT) pour l'inférence.
-* **Chakra Petch** (Cadson Demak, licence OFL) — police des titres de l'édition Capri, embarquée dans
-  `app/src/capri/res/font`.

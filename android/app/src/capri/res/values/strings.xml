@@ -3,6 +3,5 @@
     <string name="app_name">Capri</string>
     <string name="notification_channel_name">Interpolation running</string>
     <string name="notification_channel_desc">Progress of video interpolation jobs</string>
-    <!-- The carmine field the character stands on: the black silhouette needs it to pop. -->
-    <color name="ic_launcher_background">#FF0A54</color>
+    <color name="ic_launcher_background">#0B0A14</color>
 </resources>
