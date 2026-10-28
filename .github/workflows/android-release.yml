@@ -110,6 +110,11 @@ jobs:
             interpolation démarre immédiatement. Les inférences parallèles se règlent avec un curseur
             (2 par défaut).
 
+            Nouveau en 1.7.2 : le menu principal est découpé en trois bandes — le dégradé ne couvre
+            plus que le logo et le mot CAPRI, les réglages du moteur passent dans une barre Material You,
+            et la lecture système n'affiche plus que la RAM et la température de la batterie (CPU, GPU,
+            NPU, mémoire de l'app et headroom sont réservés à la vue avancée).
+
             Nouveau en 1.7.1 : retour à l'interface Capri de la 1.6.6, avec les deux défauts du menu
             principal corrigés — l'en-tête dégradé passe d'environ 180 dp à environ 80 dp (plus de gros
             bloc lumineux) et les cartes de la file ne peuvent plus se chevaucher (le nom a sa ligne,
