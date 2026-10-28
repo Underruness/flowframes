@@ -607,6 +607,45 @@ Côté tests, `UiSmokeTest` vérifie les libellés anglais réellement affichés
 « Ajouter », « Réglages », « Qualité du modèle » et n'aurait jamais pu passer depuis la traduction
 de la 1.2.0.
 
+### Version 1.7.0 — Capri a son identité, conversions parallèles
+
+**L'édition Capri ressemble enfin au personnage dont elle porte le nom.** Le thème n'est plus un
+Material You générique mais la palette de Capri : noir, rose vif carmin, vert néon du masque, bleu
+électrique des yeux et liseré violet, avec le champ de paillettes blanches, les éclats à pointes et
+l'étiquette inclinée de l'artwork. Le masque et les yeux sont dessinés en Canvas dans l'application
+(et reproduits à l'identique dans l'icône du lanceur, en couleurs et en monochrome pour les icônes
+thématiques), et la police **Chakra Petch** (OFL) est embarquée pour les titres. Le menu principal
+n'est plus une bannière dégradée de 200 dp mais un en-tête de 64 dp, et les réglages sont une seule
+ligne de pastilles qui défile.
+
+**Plus rien ne se chevauche sur un petit écran.** Chaque ligne d'une tâche occupe sa propre rangée :
+le nom et le statut partagent la première, les métadonnées sont tronquées au lieu d'être écrasées
+contre l'anneau de progression — remplacé par une barre plate à crans — et l'anneau de 46 dp qui
+mangeait la place du texte a disparu.
+
+**Les conversions de pixels sont parallèles.** Sur le chemin GPU, il ne restait que trois passes CPU
+par image générée (deux images ARGB à l'entrée, une à la sortie) : elles étaient séquentielles et
+immobilisaient le GPU plusieurs millisecondes par image en 1440p et 4K. Chaque ligne étant
+indépendante, elles sont réparties sur les mêmes threads que les couches CPU du réseau (et restent
+séquentielles sous ~400x300, où réveiller les threads coûte plus que les pixels). Mesure sur machine
+hôte x86_64 à 6 threads, avec les boucles de `app/src/main/cpp/frame_convert.h` que le téléphone
+exécute :
+
+| Résolution | séquentiel | parallèle | gain |
+|---|---|---|---|
+| 1280x720 | 1,71 ms | 0,57 ms | 66 % |
+| 1920x1080 | 4,81 ms | 2,03 ms | 58 % |
+| 2560x1440 | 7,39 ms | 2,02 ms | 73 % |
+| 3840x2160 | 17,99 ms | 5,67 ms | 68 % |
+
+*(coût CPU d'une image générée ; `android/tools/bench_convert.cpp` refait la mesure, et
+`NcnnRifeEngineTest` vérifie que le chemin ARGB 8 bits reste identique au chemin flottant.)*
+
+**Les tests d'interface tournent sur un émulateur** (`.github/workflows/android-ui-tests.yml`) : le
+lanceur compile le moteur natif x86_64 puis exécute le `UiSmokeTest` des deux éditions sur un
+émulateur Android 34, ce qui aurait attrapé un écran qui ne s'affiche pas avant de publier. Les
+échecs remontent en annotations, les logs d'un run n'étant pas lisibles sans authentification.
+
 ## Crédits et licences
 
 * **FlowFrames** (n00mkrad) — concept et pipeline d'origine, licence GPL.
@@ -616,3 +655,5 @@ de la 1.2.0.
 * Exports ONNX utilisés : `yuvraj108c/rife-onnx` et `ChimairrA/rife49_ensemble_False_scale_1_sim`
   (Hugging Face, licence MIT), conversions du modèle RIFE 4.9 de `hzwer/ECCV2022-RIFE`.
 * **ONNX Runtime** (Microsoft, licence MIT) pour l'inférence.
+* **Chakra Petch** (Cadson Demak, licence OFL) — police des titres de l'édition Capri, embarquée dans
+  `app/src/capri/res/font`.
