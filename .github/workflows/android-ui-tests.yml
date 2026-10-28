@@ -88,17 +88,28 @@ jobs:
 
       - name: Boot the emulator
         run: |
-          nohup $ANDROID_HOME/emulator/emulator -avd "$AVD_NAME" -no-window -no-audio -no-boot-anim \
-            -no-snapshot -gpu swiftshader_indirect -camera-back none -camera-front none \
+          # Absolute paths: the first attempt died in a second because adb was not on this shell's
+          # PATH, which said nothing about the emulator it was supposed to talk to.
+          ADB="$ANDROID_HOME/platform-tools/adb"
+          EMU="$ANDROID_HOME/emulator/emulator"
+          for tool in "$ADB" "$EMU"; do
+            [ -x "$tool" ] || { echo "::error title=outillage::absent: $tool"; exit 1; }
+          done
+          nohup "$EMU" -avd "$AVD_NAME" -no-window -no-audio -no-boot-anim -no-snapshot \
+            -gpu swiftshader_indirect -camera-back none -camera-front none \
             > /tmp/emulator.log 2>&1 &
-          adb wait-for-device
+          for i in $(seq 1 60); do
+            "$ADB" devices | grep -q 'emulator-' && break
+            sleep 5
+          done
+          "$ADB" wait-for-device
           boot=""
           for i in $(seq 1 120); do
-            boot=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            boot=$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
             [ "$boot" = "1" ] && break
             sleep 5
           done
-          adb devices
+          "$ADB" devices
           echo "::notice title=boot::sys.boot_completed=$boot"
           if [ "$boot" != "1" ]; then
             echo "::error title=émulateur::$(tail -25 /tmp/emulator.log | tr '\n' '|' | head -c 900)"
@@ -130,7 +141,7 @@ jobs:
           echo "=== emulator.log (tail) ==="
           tail -80 /tmp/emulator.log || true
           echo "=== logcat (tail) ==="
-          adb logcat -d -t 300 || true
+          "$ANDROID_HOME/platform-tools/adb" logcat -d -t 300 || true
 
       - name: Upload the test reports
         if: always()
