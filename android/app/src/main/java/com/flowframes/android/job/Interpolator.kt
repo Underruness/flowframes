@@ -1,13 +1,17 @@
 package com.flowframes.android.job
 
+import android.content.ContentValues
 import android.content.Context
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
+import android.provider.MediaStore
 import androidx.documentfile.provider.DocumentFile
+import com.flowframes.android.BuildConfig
 import com.flowframes.android.core.DeviceInfo
 import com.flowframes.android.core.IntArrayPool
 import com.flowframes.android.core.FrameMath
@@ -260,6 +264,7 @@ class Interpolator(
                 onProgress(1f, "Done")
                 log("Done → ${outTarget.label} ($frames frames)")
                 runCatching { outTarget.fd.close() }
+                publishOutput(outTarget)
                 return Output(outTarget.uri, outTarget.label, frames, outTarget.path)
             }
         } catch (t: Throwable) {
@@ -273,7 +278,9 @@ class Interpolator(
         val uri: Uri,
         val label: String,
         val path: String?,
-        val fd: ParcelFileDescriptor
+        val fd: ParcelFileDescriptor,
+        /** MediaStore entry created hidden: it only becomes visible through [publishOutput]. */
+        val pending: Boolean = false
     )
 
     private fun readAudioFormat(uri: Uri): MediaFormat? = runCatching {
@@ -690,6 +697,11 @@ class Interpolator(
                 log("Output folder not writable, falling back to the app folder")
             }
         }
+        // Capri writes into Download/capri through MediaStore: the folder appears by itself and no
+        // storage permission is needed on Android 10+. Older phones keep the app folder below.
+        if (BuildConfig.EDITION_CAPRI && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            createInDownloads(baseName)?.let { return it }
+        }
         val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES), "FlowFrames").apply { mkdirs() }
         val existing = dir.list()?.toSet() ?: emptySet()
         val name = Naming.deduplicate(baseName) { it in existing }
@@ -701,12 +713,59 @@ class Interpolator(
         return OutputTarget(Uri.fromFile(file), name, file.absolutePath, fd)
     }
 
+    /**
+     * Creates the output in Download/capri through MediaStore.
+     *
+     * The entry starts pending, so no other app sees a half-written file until [publishOutput]
+     * clears the flag. MediaStore renames on a duplicate name, so the real name is read back and
+     * used in the log and in the queue instead of the requested one.
+     */
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
+    private fun createInDownloads(baseName: String): OutputTarget? {
+        val resolver = context.contentResolver
+        val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, baseName)
+            put(MediaStore.Downloads.MIME_TYPE, "video/mp4")
+            put(MediaStore.Downloads.RELATIVE_PATH, "Download/capri")
+            put(MediaStore.Downloads.IS_PENDING, 1)
+        }
+        return runCatching {
+            val uri = resolver.insert(collection, values) ?: return null
+            val fd = resolver.openFileDescriptor(uri, "rw") ?: run {
+                resolver.delete(uri, null, null)
+                return null
+            }
+            val name = resolver.query(
+                uri,
+                arrayOf(MediaStore.Downloads.DISPLAY_NAME),
+                null,
+                null,
+                null
+            )?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null } ?: baseName
+            OutputTarget(uri, name, null, fd, pending = true)
+        }.getOrElse { t ->
+            log("Download/capri unavailable (${t.message ?: t.javaClass.simpleName}), using the app folder")
+            null
+        }
+    }
+
+    /** A pending MediaStore entry is invisible in the file manager until this clears IS_PENDING. */
+    private fun publishOutput(target: OutputTarget) {
+        if (!target.pending || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        runCatching {
+            val values = ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }
+            context.contentResolver.update(target.uri, values, null, null)
+        }
+    }
+
     private fun deleteOutput(target: OutputTarget) {
         runCatching {
             if (target.path != null) {
                 File(target.path).delete()
             } else {
-                DocumentFile.fromSingleUri(context, target.uri)?.delete()
+                // A SAF document and a MediaStore entry are both removed through the resolver.
+                context.contentResolver.delete(target.uri, null, null)
             }
         }
     }

@@ -130,12 +130,15 @@ class PipelineEndToEndTest {
         val result = interpolator.process(Uri.fromFile(input), "input.mp4")
         println("PIPELINE: pipeline finished in ${System.currentTimeMillis() - startedAt} ms")
 
-        assertNotNull("aucune sortie", result.path)
-        val output = File(result.path!!)
-        assertTrue("sortie vide (${output.length()} octets)", output.length() > 2000)
+        // Capri writes through MediaStore (Download/capri) and has no file path any more: the size
+        // is read from the descriptor when the output has no path.
+        assertNotNull("aucune sortie", result.uri)
+        val outputBytes = result.path?.let { File(it).length() }
+            ?: (context.contentResolver.openFileDescriptor(result.uri, "r")?.use { it.statSize } ?: 0L)
+        assertTrue("sortie vide ($outputBytes octets)", outputBytes > 2000)
         assertEquals(1f, lastProgress, 0.001f)
 
-        val outInfo = VideoInfo.read(context, Uri.fromFile(output))
+        val outInfo = VideoInfo.read(context, result.uri)
         assertNotNull("sortie illisible", outInfo)
         assertEquals(width, outInfo!!.displayWidth)
         assertEquals(height, outInfo.displayHeight)
@@ -146,6 +149,6 @@ class PipelineEndToEndTest {
         assertEquals((sourceFrames - 1) / 30.0, outInfo.durationSeconds, 0.2)
         assertEquals(60.0, outInfo.fps, 6.0)
 
-        println("PIPELINE OK: ${result.label} — ${result.frames} images, ${output.length()} octets")
+        println("PIPELINE OK: ${result.label} — ${result.frames} images, $outputBytes octets")
     }
 }

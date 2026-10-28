@@ -29,6 +29,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -43,6 +44,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.flowframes.android.core.RifeEngine
@@ -53,6 +55,7 @@ import com.flowframes.android.job.EngineWarmup
 import com.flowframes.android.job.InterpolationService
 import com.flowframes.android.job.JobItem
 import com.flowframes.android.job.Settings
+import com.flowframes.android.ui.CapriInk
 import com.flowframes.android.ui.CapriSettingsScreen
 import com.flowframes.android.ui.CapriStudio
 import com.flowframes.android.ui.CapriTheme
@@ -182,19 +185,36 @@ class MainActivity : ComponentActivity() {
         BackHandler(enabled = tab == Tab.SETTINGS) { tab = Tab.STUDIO }
 
         Scaffold(
+            containerColor = Color.Black,
             bottomBar = {
-                NavigationBar(containerColor = Color.Black) {
+                // 3 dp of tonal elevation is Material 3's default and it veils the bar grey on
+                // black: pinning it to 0 keeps the navigation bar black.
+                NavigationBar(containerColor = Color.Black, tonalElevation = 0.dp) {
                     NavigationBarItem(
                         selected = tab == Tab.STUDIO,
                         onClick = { tab = Tab.STUDIO },
                         icon = { Icon(Icons.Filled.Movie, contentDescription = null) },
-                        label = { Text("Studio", fontSize = 11.sp) }
+                        label = { Text("Studio", fontSize = 11.sp) },
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = CapriInk,
+                            selectedTextColor = MaterialTheme.colorScheme.primary,
+                            indicatorColor = MaterialTheme.colorScheme.primary,
+                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     )
                     NavigationBarItem(
                         selected = tab == Tab.SETTINGS,
                         onClick = { tab = Tab.SETTINGS },
                         icon = { Icon(Icons.Filled.Tune, contentDescription = null) },
-                        label = { Text("Settings", fontSize = 11.sp) }
+                        label = { Text("Settings", fontSize = 11.sp) },
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = CapriInk,
+                            selectedTextColor = MaterialTheme.colorScheme.primary,
+                            indicatorColor = MaterialTheme.colorScheme.primary,
+                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     )
                 }
             }

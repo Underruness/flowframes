@@ -110,6 +110,15 @@ jobs:
             interpolation démarre immédiatement. Les inférences parallèles se règlent avec un curseur
             (2 par défaut).
 
+            Nouveau en 1.7.4 : Capri perd la barre lumineuse sous le titre et gagne une voie lactée
+            animée à la place du champ d'étoiles — nébuleuse en trois halos, bande laiteuse inclinée,
+            trois couches d'étoiles qui scintillent et des météores qui traversent le ciel. Les cartes
+            de la file ne se chevauchent plus (le « Total time » s'affichait par-dessus le nom du
+            fichier), l'anneau de progression laisse la place à une barre d'avancement en vague avec
+            son pourcentage, et la barre de navigation est noire. Côté moteur, fp16 et cooperative
+            matrix sont activés par défaut sur Capri (FlowFrames garde ses réglages sûrs), et la vidéo
+            sort dans Download/capri, créé automatiquement, sans permission de stockage.
+
             Nouveau en 1.7.3 : Capri passe en noir OLED — fond, cartes, barres et panneau de log sont
             noirs, un champ d'étoiles discret anime l'arrière-plan, le dégradé ne reste que dans les
             lettres de CAPRI et dans une barre lumineuse vide placée dessous. La poubelle à côté du

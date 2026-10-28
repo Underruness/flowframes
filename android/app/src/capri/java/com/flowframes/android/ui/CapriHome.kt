@@ -57,12 +57,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -103,17 +110,16 @@ fun CapriStudio(
     onShareLogs: () -> Unit,
     onRemove: (String) -> Unit
 ) {
-    // Pure black behind everything, with a quiet starfield on it: the OLED look the edition asks
-    // for, and something for the eye to rest on between the bright bars.
+    // Pure black behind everything, with an animated Milky Way on it: the OLED look the edition
+    // asks for, and something for the eye to rest on between the bright bars.
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        StarField()
+        CosmicBackground()
         Column(modifier = Modifier.fillMaxSize()) {
         CapriHero(settings = settings)
-        LuminousBar()
         EngineBar(settings = settings, warmup = warmup)
         SystemStrip(running = running, advanced = settings.advanced)
         Box(modifier = Modifier
@@ -202,95 +208,170 @@ private fun CapriHero(settings: Settings) {
 }
 
 /**
- * The luminous bar under the wordmark: the same band as before, empty, so the colour reads as a
- * signature instead of a banner.
+ * The background: a Milky Way instead of a field of dots.
+ *
+ * Three radial gradients fake the nebula, a tilted band carries the galactic dust, and three star
+ * layers (built once as [Path]s in a 0..1 square, stretched to the screen) twinkle on a 90 s cycle
+ * while three meteors cross the band every 30 s. Per frame that is three drawPath calls and three
+ * lines: no bitmap, no per-star allocation.
  */
 @Composable
-private fun LuminousBar() {
-    val transition = rememberInfiniteTransition(label = "capri-bar")
-    val phase by transition.animateFloat(
+private fun CosmicBackground(modifier: Modifier = Modifier) {
+    val sky = remember { buildSky() }
+    val transition = rememberInfiniteTransition(label = "cosmos")
+    val twinkle by transition.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(9000, easing = LinearEasing), RepeatMode.Reverse),
-        label = "phase"
+        animationSpec = infiniteRepeatable(tween(90_000, easing = LinearEasing), RepeatMode.Restart),
+        label = "twinkle"
     )
-    val colors = listOf(
-        lerp(CapriYellow, CapriCyan, phase),
-        lerp(CapriMagenta, CapriYellow, phase),
-        lerp(CapriCyan, CapriMagenta, phase)
-    )
-    val start = Offset.Zero
-    val end = Offset(900f, 40f)
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp)
-            .padding(top = 12.dp)
-            .height(40.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        // Halo: the same colours at low alpha, taller, so the bar glows instead of sitting flat.
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(40.dp)
-                .clip(RoundedCornerShape(20.dp))
-                .background(Brush.linearGradient(colors.map { it.copy(alpha = 0.16f) }, start, end))
-        )
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(12.dp)
-                .clip(RoundedCornerShape(6.dp))
-                .background(Brush.linearGradient(colors, start, end))
-        )
-    }
-}
-
-/** A quiet field of stars behind everything: the OLED black needs something to breathe. */
-@Composable
-private fun StarField(modifier: Modifier = Modifier) {
-    val stars = remember {
-        val random = java.util.Random(7919L)
-        List(72) {
-            Star(
-                x = random.nextFloat(),
-                y = random.nextFloat(),
-                radius = 0.7f + random.nextFloat() * 1.5f,
-                alpha = 0.18f + random.nextFloat() * 0.55f,
-                speed = 0.35f + random.nextFloat() * 1.1f,
-                phase = random.nextFloat()
-            )
-        }
-    }
-    val transition = rememberInfiniteTransition(label = "stars")
-    val time by transition.animateFloat(
+    val meteors by transition.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(16000, easing = LinearEasing), RepeatMode.Restart),
-        label = "time"
+        animationSpec = infiniteRepeatable(tween(30_000, easing = LinearEasing), RepeatMode.Restart),
+        label = "meteors"
     )
     Canvas(modifier = modifier.fillMaxSize()) {
-        stars.forEach { star ->
-            val twinkle = 0.55f + 0.45f * kotlin.math.sin((time * star.speed + star.phase) * 6.2831853f)
-            drawCircle(
-                color = Color.White.copy(alpha = (star.alpha * twinkle).coerceIn(0f, 1f)),
-                radius = star.radius * density,
-                center = Offset(star.x * size.width, star.y * size.height)
+        // Nebula: three soft pools of colour, just enough to keep the black from being flat.
+        drawRect(
+            Brush.radialGradient(
+                colors = listOf(Color(0xFF1B1240).copy(alpha = 0.55f), Color.Transparent),
+                center = Offset(size.width * 0.18f, size.height * 0.12f),
+                radius = size.maxDimension * 0.55f
             )
+        )
+        drawRect(
+            Brush.radialGradient(
+                colors = listOf(Color(0xFF3A0F33).copy(alpha = 0.42f), Color.Transparent),
+                center = Offset(size.width * 0.92f, size.height * 0.34f),
+                radius = size.maxDimension * 0.50f
+            )
+        )
+        drawRect(
+            Brush.radialGradient(
+                colors = listOf(Color(0xFF06263A).copy(alpha = 0.38f), Color.Transparent),
+                center = Offset(size.width * 0.34f, size.height * 0.88f),
+                radius = size.maxDimension * 0.60f
+            )
+        )
+
+        // The band itself: a tilted stripe, brightest along its middle, over ~30 % of the height.
+        rotate(degrees = -24f) {
+            val bandHeight = size.height * 0.30f
+            drawRect(
+                brush = Brush.verticalGradient(
+                    colors = listOf(
+                        Color.Transparent,
+                        Color(0xFF6E5AA8).copy(alpha = 0.08f),
+                        Color(0xFFC0A6E8).copy(alpha = 0.14f),
+                        Color.Transparent
+                    ),
+                    startY = center.y - bandHeight / 2f,
+                    endY = center.y + bandHeight / 2f
+                ),
+                topLeft = Offset(-size.width * 0.30f, center.y - bandHeight / 2f),
+                size = Size(size.width * 1.60f, bandHeight)
+            )
+        }
+
+        // The stars: three prebuilt layers, one drawPath each. They are drawn in a 0..1 square
+        // scaled to the screen, so the whole field costs one transform per layer.
+        scale(scaleX = size.width, scaleY = size.height, pivot = Offset.Zero) {
+            drawPath(sky.faint, Color.White.copy(alpha = twinkleAt(twinkle, 0.3f, 0.38f)))
+            drawPath(sky.mid, Color.White.copy(alpha = twinkleAt(twinkle, 1.7f, 0.62f)))
+            drawPath(sky.bright, Color.White.copy(alpha = twinkleAt(twinkle, 3.1f, 0.92f)))
+        }
+
+        // Meteors: three streaks on a 30 s cycle, faded in and out so none of them pops.
+        sky.meteors.forEach { meteor ->
+            val progress = (meteors + meteor.phase) % 1f
+            val fade = kotlin.math.sin(progress * 3.1415927f)
+            if (fade > 0.02f) {
+                val head = Offset(
+                    (meteor.x + progress * meteor.dx) * size.width,
+                    (meteor.y + progress * meteor.dy) * size.height
+                )
+                val tail = Offset(
+                    head.x - meteor.length * size.width,
+                    head.y - meteor.length * size.width * 0.45f
+                )
+                drawLine(
+                    brush = Brush.linearGradient(
+                        colors = listOf(Color.Transparent, Color.White.copy(alpha = 0.75f * fade)),
+                        start = tail,
+                        end = head
+                    ),
+                    start = tail,
+                    end = head,
+                    strokeWidth = 1.6.dp.toPx(),
+                    cap = StrokeCap.Round
+                )
+            }
         }
     }
 }
 
-/** One star of the field: position in 0..1, radius in dp, twinkle speed and phase. */
-private class Star(
+/** Twinkle of one layer: 0.74 + 0.26 × sin(...) around its own base alpha. */
+private fun twinkleAt(time: Float, phase: Float, base: Float): Float =
+    (base * (0.74f + 0.26f * kotlin.math.sin(time * 6.2831853f * 3f + phase))).coerceIn(0f, 1f)
+
+/** The static part of the sky: three star layers, plus where each meteor starts and travels. */
+private class Sky(
+    val faint: Path,
+    val mid: Path,
+    val bright: Path,
+    val meteors: List<Meteor>
+)
+
+/** One meteor: start and travel in 0..1, tail length as a fraction of the width, cycle offset. */
+private class Meteor(
     val x: Float,
     val y: Float,
-    val radius: Float,
-    val alpha: Float,
-    val speed: Float,
+    val dx: Float,
+    val dy: Float,
+    val length: Float,
     val phase: Float
 )
+
+/**
+ * Builds the sky once: the stars sit in a 0..1 square, so the canvas only has to scale them.
+ *
+ * Along the band the stars follow the -24° tilt, and their distance from the core is the sum of
+ * three uniforms: that is denser in the middle and thins out towards the edges, like a galaxy seen
+ * from inside. The field stars around them are uniformly spread.
+ */
+private fun buildSky(): Sky {
+    val random = java.util.Random(20261028L)
+
+    fun add(path: Path, x: Float, y: Float, radius: Float) {
+        path.addOval(Rect(Offset(x - radius, y - radius), Offset(x + radius, y + radius)))
+    }
+
+    fun layer(band: Int, field: Int, radius: Float): Path {
+        val path = Path()
+        repeat(band) {
+            val x = random.nextFloat() * 1.6f - 0.3f
+            val spread = (random.nextFloat() + random.nextFloat() + random.nextFloat() - 1.5f) / 1.5f
+            val y = 0.5f - (x - 0.5f) * 0.445f + spread * 0.13f
+            add(path, x, y, radius * (0.65f + random.nextFloat() * 0.70f))
+        }
+        repeat(field) {
+            add(path, random.nextFloat(), random.nextFloat(), radius * (0.55f + random.nextFloat() * 0.90f))
+        }
+        return path
+    }
+
+    return Sky(
+        faint = layer(band = 620, field = 80, radius = 0.0011f),
+        mid = layer(band = 240, field = 70, radius = 0.0018f),
+        bright = layer(band = 70, field = 45, radius = 0.0028f),
+        meteors = listOf(
+            Meteor(x = 0.05f, y = 0.16f, dx = 0.95f, dy = 0.42f, length = 0.22f, phase = 0.10f),
+            Meteor(x = -0.10f, y = 0.40f, dx = 1.05f, dy = 0.45f, length = 0.16f, phase = 0.48f),
+            Meteor(x = 0.20f, y = 0.04f, dx = 0.85f, dy = 0.38f, length = 0.28f, phase = 0.77f)
+        )
+    )
+}
 
 /**
  * Bar two, in Material You: what the engine will do, and whether the GPU is already prepared.
@@ -443,12 +524,9 @@ private fun CapriEmptyState(onAdd: () -> Unit) {
 private fun JobCard(job: JobItem, canRemove: Boolean, onRemove: () -> Unit, modifier: Modifier = Modifier) {
     val accent = statusColor(job.status)
     val running = job.status == JobStatus.RUNNING
-    val sweep by animateFloatAsState(
-        targetValue = job.progress.coerceIn(0f, 1f) * 360f,
-        animationSpec = tween(600, easing = FastOutSlowInEasing),
-        label = "job-progress"
-    )
-    Box(
+    // A Column, not a Box: everything after the first row used to be drawn at the same origin as
+    // the file name, which is exactly how "Total time" ended up on top of it.
+    Column(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(26.dp))
@@ -464,69 +542,40 @@ private fun JobCard(job: JobItem, canRemove: Boolean, onRemove: () -> Unit, modi
             )
             .padding(14.dp)
     ) {
-        Row(verticalAlignment = Alignment.Top) {
-            Canvas(modifier = Modifier.size(46.dp)) {
-                val stroke = Stroke(width = size.minDimension * 0.13f, cap = StrokeCap.Round)
-                val inset = stroke.width / 2f
-                val box = Size(size.width - stroke.width, size.height - stroke.width)
-                drawArc(
-                    color = accent.copy(alpha = 0.18f),
-                    startAngle = -90f,
-                    sweepAngle = 360f,
-                    useCenter = false,
-                    topLeft = Offset(inset, inset),
-                    size = box,
-                    style = stroke
-                )
-                drawArc(
-                    color = accent,
-                    startAngle = -90f,
-                    sweepAngle = sweep,
-                    useCenter = false,
-                    topLeft = Offset(inset, inset),
-                    size = box,
-                    style = stroke
-                )
-            }
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                // The name gets its own line (the remove button only competes with it), and the
-                // badge moved to the line below with the metadata: nothing has to share a few dp
-                // any more, which is what used to push the name under the badge on a small screen.
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        job.displayName,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 14.5.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                    if (canRemove) {
-                        IconButton(onClick = onRemove, modifier = Modifier.size(26.dp)) {
-                            Icon(
-                                Icons.Filled.Close,
-                                contentDescription = "Remove",
-                                modifier = Modifier.size(14.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.height(5.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    StatusBadge(job.status, accent)
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        metaLine(job),
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
+        // The 46 dp ring ate the space the text needed; the wave bar at the bottom of the card
+        // carries the same information on one thin line.
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                job.displayName,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 14.5.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            if (canRemove) {
+                IconButton(onClick = onRemove, modifier = Modifier.size(26.dp)) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "Remove",
+                        modifier = Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
+        }
+        Spacer(Modifier.height(5.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StatusBadge(job.status, accent)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                metaLine(job),
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
         }
         job.detail.takeIf { it.isNotEmpty() }?.let {
             Spacer(Modifier.height(8.dp))
@@ -553,6 +602,93 @@ private fun JobCard(job: JobItem, canRemove: Boolean, onRemove: () -> Unit, modi
             )
         }
         JobTimer(job)
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            WaveProgressBar(
+                fraction = job.progress,
+                color = accent,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(
+                "${(job.progress.coerceIn(0f, 1f) * 100).toInt()} %",
+                fontSize = 10.5.sp,
+                fontWeight = FontWeight.Bold,
+                color = accent,
+                maxLines = 1,
+                softWrap = false
+            )
+        }
+    }
+}
+
+/**
+ * The progress bar: a rounded track whose filled part carries a moving sine wave.
+ *
+ * Two sine lines slide over an accent → white → accent gradient, clipped to the filled rounded
+ * rectangle. The fraction is animated, so a jump in the job does not jump on the screen.
+ */
+@Composable
+private fun WaveProgressBar(fraction: Float, color: Color, modifier: Modifier = Modifier) {
+    val target by animateFloatAsState(
+        targetValue = fraction.coerceIn(0f, 1f),
+        animationSpec = tween(600, easing = FastOutSlowInEasing),
+        label = "wave-fraction"
+    )
+    val transition = rememberInfiniteTransition(label = "wave")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(2200, easing = LinearEasing), RepeatMode.Restart),
+        label = "wave-phase"
+    )
+    Canvas(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(12.dp)
+    ) {
+        val radius = size.height / 2f
+        val track = Path().apply {
+            addRoundRect(RoundRect(rect = Rect(Offset.Zero, size), cornerRadius = CornerRadius(radius, radius)))
+        }
+        drawPath(track, Color.White.copy(alpha = 0.09f))
+        val filled = target * size.width
+        if (filled < 1f) return@Canvas
+        val window = Path().apply {
+            addRoundRect(
+                RoundRect(
+                    rect = Rect(0f, 0f, filled, size.height),
+                    cornerRadius = CornerRadius(radius, radius)
+                )
+            )
+        }
+        clipPath(window) {
+            drawRect(
+                brush = Brush.horizontalGradient(
+                    colors = listOf(color, Color.White, color),
+                    startX = 0f,
+                    endX = size.width
+                )
+            )
+            fun wave(offset: Float, amplitude: Float, alpha: Float) {
+                val path = Path()
+                val step = 4f
+                var x = 0f
+                while (x <= size.width + step) {
+                    val angle = (x / size.width * 3.4f + offset + phase * 2f) * 3.1415927f
+                    val y = size.height / 2f + amplitude * kotlin.math.sin(angle)
+                    if (x == 0f) path.moveTo(x, y) else path.lineTo(x, y)
+                    x += step
+                }
+                drawPath(
+                    path,
+                    Color.White.copy(alpha = alpha),
+                    style = Stroke(width = 1.6.dp.toPx(), cap = StrokeCap.Round)
+                )
+            }
+            wave(offset = 0f, amplitude = size.height * 0.26f, alpha = 0.20f)
+            wave(offset = 1.1f, amplitude = size.height * 0.18f, alpha = 0.10f)
+        }
     }
 }
 

@@ -1,6 +1,7 @@
 package com.flowframes.android.job
 
 import android.content.Context
+import com.flowframes.android.BuildConfig
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -74,9 +75,9 @@ data class Settings(
      * suspect being ncnn's Adreno cooperative-matrix kernels, now disabled separately ([coopMatrix]).
      * fp16 *storage* stays on, which is what the 6 fps measurement used.
      */
-    val fp16: Boolean = false,
+    val fp16: Boolean = BuildConfig.EDITION_FP16_DEFAULT,
     /** Cooperative-matrix kernels for fp16 math; experimental on Adreno. */
-    val coopMatrix: Boolean = false,
+    val coopMatrix: Boolean = BuildConfig.EDITION_FP16_DEFAULT,
     /**
      * Hybrid mode: while the GPU computes most phases, CPU workers (ncnn, same model) take some
      * as well. Every worker pulls the next phase from one queue, so the split follows the speeds.
@@ -118,7 +119,7 @@ data class Settings(
 class SettingsStore(context: Context) {
 
     private companion object {
-        const val DEFAULTS_VERSION = 3
+        const val DEFAULTS_VERSION = 4
     }
 
     private val appContext = context.applicationContext
@@ -150,17 +151,20 @@ class SettingsStore(context: Context) {
         val d = Settings()
         // 1.6.3 and 1.6.6 changed the defaults (source resolution, GPU, RIFE 4.6, two parallel
         // inferences, HEVC, high bitrate): apply them once over what older versions saved, keep
-        // everything else.
+        // everything else. 1.7.4 adds the Capri-only fp16 defaults, so an edition that never had
+        // them gets them once; FlowFrames keeps whatever it saved.
         if (prefs.getInt("defaultsVersion", 0) < DEFAULTS_VERSION && prefs.all.isNotEmpty()) {
-            prefs.edit()
+            val edit = prefs.edit()
                 .putInt("maxLongSide", d.maxLongSide)
                 .putString("engine", d.engine.name)
                 .putString("ncnnModel", d.ncnnModel.name)
                 .putInt("parallelInferences", d.workers)
                 .putString("codec", d.codec.name)
                 .putInt("bitratePreset", d.bitratePreset)
-                .putInt("defaultsVersion", DEFAULTS_VERSION)
-                .apply()
+            if (BuildConfig.EDITION_FP16_DEFAULT) {
+                edit.putBoolean("fp16Arith", true).putBoolean("coopMatrix", true)
+            }
+            edit.putInt("defaultsVersion", DEFAULTS_VERSION).apply()
         }
         return Settings(
             factor = prefs.getInt("factor", d.factor).coerceIn(1, 32),

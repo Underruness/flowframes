@@ -173,15 +173,16 @@ fun CapriSettingsScreen(
             )
 
             CapriSwitch(
-                title = "fp16 arithmetic (experimental)",
-                description = "Half-precision math in the network. Off by default: on a Snapdragon 8 Elite it hung " +
-                    "the GPU. Where it works the difference is invisible (50 dB).",
+                title = "fp16 arithmetic",
+                description = "On by default in Capri: half-precision math in the network, about 50 dB from the " +
+                    "fp32 result (invisible). Turn it off if a job hangs — that is the safe fallback.",
                 checked = settings.fp16,
                 onCheckedChange = { v -> onChange { s -> s.copy(fp16 = v) } }
             )
             CapriSwitch(
-                title = "Cooperative matrix (experimental)",
-                description = "ncnn's tensor-core kernels for fp16 math (Adreno 8xx), used only together with fp16.",
+                title = "Cooperative matrix",
+                description = "On by default in Capri; off is the safe fallback. ncnn's tensor-core kernels for " +
+                    "fp16 math (Adreno 8xx), used only together with fp16.",
                 checked = settings.coopMatrix,
                 onCheckedChange = { v -> onChange { s -> s.copy(coopMatrix = v) } }
             )
@@ -259,7 +260,11 @@ fun CapriSettingsScreen(
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    if (settings.outputTreeUri != null) "Custom folder" else "App folder (no permission required)",
+                    if (settings.outputTreeUri != null) {
+                        "Custom folder"
+                    } else {
+                        "Downloads/capri (created automatically)"
+                    },
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f)
@@ -396,7 +401,7 @@ fun CapriSettingsScreen(
             }) { Text("Clear GPU shader cache", fontSize = 12.sp) }
             Spacer(Modifier.height(2.dp))
             Text(
-                "Capri 1.6.6 - RIFE 4.9 / 4.6 models (MIT) - ncnn (BSD-3) - MediaCodec for decoding and encoding.",
+                "Capri 1.7.4 - RIFE 4.9 / 4.6 models (MIT) - ncnn (BSD-3) - MediaCodec for decoding and encoding.",
                 fontSize = 11.5.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
