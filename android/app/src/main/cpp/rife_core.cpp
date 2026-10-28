@@ -135,6 +135,16 @@ int RifeCore::load(const RifeConfig& config, std::string& error) {
     return 0;
 }
 
+#include "frame_convert.h"
+
+// The per-frame pixel conversions are the only CPU work left on the GPU path, so their rows are
+// spread over the threads the CPU layers get. Below ~400x300 the frame is converted serially: waking
+// the pool would cost more than the pixels.
+int RifeCore::convertThreads(int width, int height) const {
+    if (cfg.cpuThreads <= 1 || !rowsAreWorthThreading((long long)width * height)) return 1;
+    return cfg.cpuThreads;
+}
+
 // Copies a planar frame into a zero-padded ncnn Mat (rife_preproc pads with zeros, so does this).
 void RifeCore::fillPadded(const float* planar, int width, int height, ncnn::Mat& dst) const {
     const int plane = width * height;
@@ -145,6 +155,7 @@ void RifeCore::fillPadded(const float* planar, int width, int height, ncnn::Mat&
             memcpy(outc, inc, sizeof(float) * plane);
             continue;
         }
+        #pragma omp parallel for schedule(static) num_threads(convertThreads(width, height))
         for (int y = 0; y < dst.h; y++) {
             float* row = outc + (size_t)y * dst.w;
             if (y < height) {
@@ -160,10 +171,10 @@ void RifeCore::fillPadded(const float* planar, int width, int height, ncnn::Mat&
 // Android ARGB ints (0xAARRGGBB) straight into the padded planar float input: the Java side
 // keeps 8-bit frames (4 bytes per pixel instead of 12), which is what makes 1440p and 4K fit.
 void RifeCore::fillPaddedArgb(const uint32_t* argb, int width, int height, ncnn::Mat& dst) const {
-    const float inv = 1.f / 255.f;
     float* r = dst.channel(0);
     float* g = dst.channel(1);
     float* b = dst.channel(2);
+    #pragma omp parallel for schedule(static) num_threads(convertThreads(width, height))
     for (int y = 0; y < dst.h; y++) {
         float* rr = r + (size_t)y * dst.w;
         float* gg = g + (size_t)y * dst.w;
@@ -174,13 +185,7 @@ void RifeCore::fillPaddedArgb(const uint32_t* argb, int width, int height, ncnn:
             memset(bb, 0, sizeof(float) * dst.w);
             continue;
         }
-        const uint32_t* src = argb + (size_t)y * width;
-        for (int x = 0; x < width; x++) {
-            const uint32_t c = src[x];
-            rr[x] = (float)((c >> 16) & 0xFF) * inv;
-            gg[x] = (float)((c >> 8) & 0xFF) * inv;
-            bb[x] = (float)(c & 0xFF) * inv;
-        }
+        argbRowToPlanar(argb + (size_t)y * width, rr, gg, bb, width);
         for (int x = width; x < dst.w; x++) rr[x] = gg[x] = bb[x] = 0.f;
     }
 }
@@ -231,19 +236,11 @@ int RifeCore::interpolateArgb(const uint32_t* frame0, const uint32_t* frame1, in
     const float* r = result.channel(0);
     const float* g = result.channel(1);
     const float* b = result.channel(2);
+    // Same rounding as FrameMath.planarToArgb: round half up, clamp to [0, 255] (planarRowToArgb).
+    #pragma omp parallel for schedule(static) num_threads(convertThreads(width, height))
     for (int y = 0; y < height; y++) {
         const size_t row = (size_t)y * result.w;
-        uint32_t* d = out + (size_t)y * width;
-        for (int x = 0; x < width; x++) {
-            // Same rounding as FrameMath.planarToArgb: round half up, clamp to [0, 255].
-            int rr = (int)(r[row + x] * 255.f + 0.5f);
-            int gg = (int)(g[row + x] * 255.f + 0.5f);
-            int bb = (int)(b[row + x] * 255.f + 0.5f);
-            rr = rr < 0 ? 0 : (rr > 255 ? 255 : rr);
-            gg = gg < 0 ? 0 : (gg > 255 ? 255 : gg);
-            bb = bb < 0 ? 0 : (bb > 255 ? 255 : bb);
-            d[x] = 0xFF000000u | ((uint32_t)rr << 16) | ((uint32_t)gg << 8) | (uint32_t)bb;
-        }
+        planarRowToArgb(r + row, g + row, b + row, out + (size_t)y * width, width);
     }
     return 0;
 }
@@ -274,17 +271,16 @@ int RifeCore::interpolate(const float* frame0, const float* frame1, int width, i
     int ret = run(in0, in1, width, height, timestep, result);
     if (ret != 0) return ret;
 
-    for (int c = 0; c < 3; c++) {
-        const float* src = result.channel(c);
-        float* dst = out + (size_t)c * plane;
-        for (int y = 0; y < height; y++) {
-            const float* r = src + (size_t)y * result.w;
-            float* d = dst + (size_t)y * width;
-            for (int x = 0; x < width; x++) {
-                float v = r[x];
-                d[x] = v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
-            }
-        }
+    const float* src0 = result.channel(0);
+    const float* src1 = result.channel(1);
+    const float* src2 = result.channel(2);
+    #pragma omp parallel for schedule(static) num_threads(convertThreads(width, height))
+    for (int y = 0; y < height; y++) {
+        const size_t row = (size_t)y * result.w;
+        const size_t dstRow = (size_t)y * width;
+        planarRowClamp(src0 + row, out + dstRow, width);
+        planarRowClamp(src1 + row, out + plane + dstRow, width);
+        planarRowClamp(src2 + row, out + 2 * plane + dstRow, width);
     }
     return 0;
 }

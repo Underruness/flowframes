@@ -51,6 +51,9 @@ public:
 private:
     void fillPadded(const float* planar, int width, int height, ncnn::Mat& dst) const;
     void fillPaddedArgb(const uint32_t* argb, int width, int height, ncnn::Mat& dst) const;
+    /// Threads used for the per-frame pixel conversions: 1 for a small frame or a single-thread
+    /// configuration, otherwise as many as the CPU layers of the network get.
+    int convertThreads(int width, int height) const;
     int run(const ncnn::Mat& in0, const ncnn::Mat& in1, int width, int height, float timestep,
             ncnn::Mat& result) const;
 
