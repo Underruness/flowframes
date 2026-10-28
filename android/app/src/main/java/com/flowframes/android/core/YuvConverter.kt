@@ -30,7 +30,10 @@ object YuvConverter {
         val eU: IntArray,
         val eV: IntArray,
         val encUvOff: Int
-    )
+    ) {
+        /** `y * yMul + yOff` for all 256 luma values: a table read replaces the multiply. */
+        val lumaLut: IntArray = IntArray(256) { it * yMul + yOff }
+    }
 
     val BT601_LIMITED = Spec(
         label = "bt601-limited", yMul = 298, yOff = -16 * 298,
@@ -69,25 +72,48 @@ object YuvConverter {
         y: ByteBuffer, u: ByteBuffer, v: ByteBuffer,
         yRowStride: Int, uvRowStride: Int, uvPixelStride: Int,
         width: Int, height: Int,
-        spec: Spec, out: IntArray
+        spec: Spec, out: IntArray,
+        scratch: PlaneScratch? = null
     ) {
         require(out.size >= width * height) { "output too small" }
+        // The planes are copied in bulk once and then read as plain arrays: a ByteBuffer.get(index)
+        // per channel per pixel cost more than the colour maths itself.
+        val s = scratch ?: PlaneScratch()
+        val luma = s.luma(y, width, height, yRowStride)
+        val chromaRows = (height + 1) / 2
+        val ua = s.chroma(u, uvRowStride * chromaRows)
+        val va = s.chromaV(v, uvRowStride * chromaRows)
+        val lut = spec.lumaLut
+        val cr = spec.cr
+        val cgu = spec.cgu
+        val cgv = spec.cgv
+        val cb = spec.cb
+        val pack = { rSum: Int, gSum: Int, bSum: Int ->
+            (0xFF shl 24) or (clamp((rSum + 128) shr 8) shl 16) or
+                (clamp((gSum + 128) shr 8) shl 8) or clamp((bSum + 128) shr 8)
+        }
         for (row in 0 until height) {
-            val yBase = row * yRowStride
-            val uvRow = row shr 1
-            val uvBase = uvRow * uvRowStride
-            val outBase = row * width
-            for (col in 0 until width) {
-                val yv = y.get(yBase + col).toInt() and 0xFF
+            val base = row * width
+            val uvBase = (row shr 1) * uvRowStride
+            var col = 0
+            while (col < width) {
+                // The two pixels of one chroma cell share U and V, so the three colour products are
+                // computed once per cell instead of once per pixel.
                 val cu = uvBase + (col shr 1) * uvPixelStride
-                val uv = (u.get(cu).toInt() and 0xFF) - 128
-                val vv = (v.get(cu).toInt() and 0xFF) - 128
-                val yScaled = yv * spec.yMul + spec.yOff
-                val r = (yScaled + spec.cr * vv + 128) shr 8
-                val g = (yScaled - spec.cgu * uv - spec.cgv * vv + 128) shr 8
-                val b = (yScaled + spec.cb * uv + 128) shr 8
-                out[outBase + col] = (0xFF shl 24) or
-                    (clamp(r) shl 16) or (clamp(g) shl 8) or clamp(b)
+                val uu = (ua[cu].toInt() and 0xFF) - 128
+                val vv = (va[cu].toInt() and 0xFF) - 128
+                val rAdd = cr * vv
+                val gAdd = -cgu * uu - cgv * vv
+                val bAdd = cb * uu
+                var i = base + col
+                val y0 = lut[luma[i].toInt() and 0xFF]
+                out[i] = pack(y0 + rAdd, y0 + gAdd, y0 + bAdd)
+                if (col + 1 < width) {
+                    i++
+                    val y1 = lut[luma[i].toInt() and 0xFF]
+                    out[i] = pack(y1 + rAdd, y1 + gAdd, y1 + bAdd)
+                }
+                col += 2
             }
         }
     }
@@ -171,12 +197,22 @@ object YuvConverter {
         val deg = ((rotation % 360) + 360) % 360
         // Identity case: keep the exact same code path as the unscaled converter.
         if (deg == 0 && dstW == srcW && dstH == srcH) {
-            yuv420ToArgb(y, u, v, yRowStride, uvRowStride, uvPixelStride, srcW, srcH, spec, out)
+            yuv420ToArgb(y, u, v, yRowStride, uvRowStride, uvPixelStride, srcW, srcH, spec, out, scratch)
             return
         }
         // ByteBuffer.get(index) costs a JNI-free but bounds-checked access each time (~6 ns).
         // Copying the planes in bulk and then indexing plain arrays is several times faster.
         val s = scratch ?: PlaneScratch()
+        // No rotation: the source column of an output column does not depend on the row (and the
+        // source row does not depend on the column). Building that mapping once per frame size turns
+        // the per-pixel work into four reads and one blend, for every frame of the job.
+        if (deg == 0) {
+            scaleToArgb(
+                y, u, v, yRowStride, uvRowStride, uvPixelStride,
+                srcW, srcH, dstW, dstH, spec, out, s
+            )
+            return
+        }
         val yPlane = s.luma(y, srcW, srcH, yRowStride)
         val chromaRows = (srcH + 1) / 2
         val uPlane = s.chroma(u, uvRowStride * chromaRows)
@@ -245,6 +281,74 @@ object YuvConverter {
                 val r = (yInt + spec.cr * vv + 128) shr 8
                 val g = (yInt - spec.cgu * uu - spec.cgv * vv + 128) shr 8
                 val b = (yInt + spec.cb * uu + 128) shr 8
+                out[outBase + col] = (0xFF shl 24) or
+                    (clamp(r) shl 16) or (clamp(g) shl 8) or clamp(b)
+            }
+        }
+    }
+
+    /**
+     * The unrotated scaling path: identical maths to [yuv420ToArgbScaled], with the source column
+     * of every output column resolved once in [ScaleTables] instead of once per pixel.
+     */
+    private fun scaleToArgb(
+        y: ByteBuffer, u: ByteBuffer, v: ByteBuffer,
+        yRowStride: Int, uvRowStride: Int, uvPixelStride: Int,
+        srcW: Int, srcH: Int, dstW: Int, dstH: Int,
+        spec: Spec, out: IntArray, s: PlaneScratch
+    ) {
+        val cw = (srcW + 1) / 2
+        val ch = (srcH + 1) / 2
+        s.tables.ensure(srcW, dstW, cw, uvPixelStride)
+        val x0c = s.tables.x0
+        val x1c = s.tables.x1
+        val fxc = s.tables.fx
+        val cuc = s.tables.chroma
+        val luma = s.luma(y, srcW, srcH, yRowStride)
+        val ua = s.chroma(u, uvRowStride * ch)
+        val va = s.chromaV(v, uvRowStride * ch)
+        val lut = spec.lumaLut
+        val yMul = spec.yMul
+        val yOff = spec.yOff
+        val cr = spec.cr
+        val cgu = spec.cgu
+        val cgv = spec.cgv
+        val cb = spec.cb
+        val maxY = srcH - 1
+        val maxYF = maxY.toFloat()
+        val yScale = srcH.toFloat() / dstH
+        for (row in 0 until dstH) {
+            var syf = (row + 0.5f) * yScale - 0.5f
+            if (syf < 0f) syf = 0f else if (syf > maxYF) syf = maxYF
+            val y0 = syf.toInt()
+            val fy = syf - y0
+            val y1 = if (y0 < maxY) y0 + 1 else maxY
+            val r0 = y0 * srcW
+            val r1 = y1 * srcW
+            val cBase = (y0 shr 1).coerceAtMost(ch - 1) * uvRowStride
+            val outBase = row * dstW
+            for (col in 0 until dstW) {
+                val xa = x0c[col]
+                val xb = x1c[col]
+                val fx = fxc[col]
+                val l00 = (luma[r0 + xa].toInt() and 0xFF).toFloat()
+                val l10 = (luma[r0 + xb].toInt() and 0xFF).toFloat()
+                val l01 = (luma[r1 + xa].toInt() and 0xFF).toFloat()
+                val l11 = (luma[r1 + xb].toInt() and 0xFF).toFloat()
+                val top = l00 + (l10 - l00) * fx
+                val bottom = l01 + (l11 - l01) * fx
+                val blended = top + (bottom - top) * fy
+                val uvIdx = cBase + cuc[col]
+                var uu = 0
+                var vv = 0
+                if (uvIdx >= 0 && uvIdx < ua.size) {
+                    uu = (ua[uvIdx].toInt() and 0xFF) - 128
+                    vv = (va[uvIdx].toInt() and 0xFF) - 128
+                }
+                val yInt = (blended * yMul + yOff + 0.5f).toInt()
+                val r = (yInt + cr * vv + 128) shr 8
+                val g = (yInt - cgu * uu - cgv * vv + 128) shr 8
+                val b = (yInt + cb * uu + 128) shr 8
                 out[outBase + col] = (0xFF shl 24) or
                     (clamp(r) shl 16) or (clamp(g) shl 8) or clamp(b)
             }
@@ -361,10 +465,13 @@ object YuvConverter {
         dst: ByteBuffer, src: ByteArray, rows: Int, rowStride: Int, width: Int, packedWidth: Int
     ) {
         val out = dst.duplicate()
+        val capacity = out.capacity()
         for (row in 0 until rows) {
             val start = row * rowStride
-            if (start >= out.capacity()) break
-            val end = minOf(start + width, out.capacity())
+            if (start >= capacity) break
+            val end = minOf(start + width, capacity)
+            // Same reason as PlaneScratch.luma: the limit must be widened before the next row.
+            out.limit(capacity)
             out.position(start)
             out.limit(end)
             out.put(src, row * packedWidth, end - start)
@@ -392,11 +499,50 @@ object YuvConverter {
         }
     }
 
+    /**
+     * Column mapping of the unrotated scaling path: source x0/x1, the blend factor and the chroma
+     * offset of every output column. Built once per frame geometry, reused for the whole job.
+     */
+    class ScaleTables {
+        private var key = Long.MIN_VALUE
+        var x0 = IntArray(0); private set
+        var x1 = IntArray(0); private set
+        var fx = FloatArray(0); private set
+        var chroma = IntArray(0); private set
+
+        fun ensure(srcW: Int, dstW: Int, cw: Int, uvPixelStride: Int) {
+            val k = (srcW.toLong() shl 40) or (dstW.toLong() shl 20) or (uvPixelStride.toLong() shl 8) or cw.toLong()
+            if (k == key) return
+            if (x0.size != dstW) {
+                x0 = IntArray(dstW)
+                x1 = IntArray(dstW)
+                fx = FloatArray(dstW)
+                chroma = IntArray(dstW)
+            }
+            val xScale = srcW.toFloat() / dstW
+            val maxX = srcW - 1
+            val maxXF = maxX.toFloat()
+            for (col in 0 until dstW) {
+                var sxf = (col + 0.5f) * xScale - 0.5f
+                if (sxf < 0f) sxf = 0f else if (sxf > maxXF) sxf = maxXF
+                val a = sxf.toInt()
+                x0[col] = a
+                x1[col] = if (a < maxX) a + 1 else maxX
+                fx[col] = sxf - a
+                chroma[col] = ((a shr 1).coerceAtMost(cw - 1)) * uvPixelStride
+            }
+            key = k
+        }
+    }
+
     /** Reusable plane copies so the fused decode path does not allocate per frame. */
     class PlaneScratch {
         private var yBuf: ByteArray = ByteArray(0)
         private var uvBuf: ByteArray = ByteArray(0)
         private var vBuf: ByteArray = ByteArray(0)
+
+        /** Precomputed column mapping of the unrotated scaling path. */
+        internal val tables = ScaleTables()
 
         /** Luma plane packed without row padding, `width * height` bytes. */
         fun luma(src: ByteBuffer, width: Int, height: Int, rowStride: Int): ByteArray {
@@ -409,6 +555,10 @@ object YuvConverter {
                 val start = row * rowStride
                 if (start >= capacity) break
                 val end = minOf(start + width, capacity)
+                // The limit was tightened to the end of the previous row: widen it again before
+                // moving past it. Without this, any padded stride (rowStride > width, i.e. every
+                // width that is not a multiple of 64) threw on the second row.
+                dup.limit(capacity)
                 dup.position(start)
                 dup.limit(end)
                 dup.get(out, row * width, end - start)
