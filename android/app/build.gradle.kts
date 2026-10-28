@@ -20,8 +20,8 @@ android {
         applicationId = "com.flowframes.android"
         minSdk = 26
         targetSdk = 34
-        versionCode = 19
-        versionName = "1.7.3"
+        versionCode = 20
+        versionName = "1.7.4"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Ship 64-bit ARM by default (every Android phone since ~2016).
@@ -48,10 +48,16 @@ android {
         create("flowframes") {
             dimension = "edition"
             applicationId = "com.flowframes.android"
+            buildConfigField("boolean", "EDITION_CAPRI", "false")
+            buildConfigField("boolean", "EDITION_FP16_DEFAULT", "false")
         }
         create("capri") {
             dimension = "edition"
             applicationId = "com.flowframes.android.capri"
+            // Capri's own defaults: fp16 math and the cooperative-matrix kernels on, and the output
+            // in Download/capri. The historical edition keeps its conservative settings.
+            buildConfigField("boolean", "EDITION_CAPRI", "true")
+            buildConfigField("boolean", "EDITION_FP16_DEFAULT", "true")
         }
     }
 
@@ -96,6 +102,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     composeOptions {
