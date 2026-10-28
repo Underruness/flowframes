@@ -41,35 +41,32 @@ jobs:
           else
             echo "No release key secret: the APK is signed with the debug key"
           fi
-      - name: Build the release APKs (FlowFrames + Capri)
+      - name: Build the release APK (Capri)
+        # CMake fetches stable-diffusion.cpp (pinned tag) on the first configure and compiles it for
+        # arm64: the first CI run of a commit pays a few extra minutes for the diffusion engine.
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon assembleRelease
           BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
-          cp app/build/outputs/apk/flowframes/release/app-flowframes-release.apk FlowFrames-Android.apk
-          cp app/build/outputs/apk/capri/release/app-capri-release.apk Capri-Android.apk
-          for apk in FlowFrames-Android.apk Capri-Android.apk; do
-            echo "=== $apk"
-            if [ -f keystore.properties ]; then
-              # Gradle drops the v1 (JAR) signature when minSdk >= 24, but some installers (Honor
-              # MagicOS) only read v1 and refuse the APK ("does not contain any certificates").
-              # Re-sign with v1 + v2 + v3.
-              PW=$(grep '^storePassword=' keystore.properties | cut -d= -f2-)
-              $BT/zipalign -f -p 4 "$apk" aligned.apk
-              $BT/apksigner sign --ks release.jks --ks-pass "pass:$PW" --ks-key-alias flowframes \
-                --key-pass "pass:$PW" --min-sdk-version 21 --v1-signing-enabled true \
-                --v2-signing-enabled true --v3-signing-enabled true --out "$apk" aligned.apk
-              rm -f aligned.apk "$apk.idsig"
-            fi
-            $BT/apksigner verify --verbose --print-certs --min-sdk-version 21 "$apk" | head -8
-            $BT/apksigner verify --min-sdk-version 21 -v "$apk" | grep -q "v1 scheme (JAR signing): true" || [ ! -f keystore.properties ]
-          done
+          cp app/build/outputs/apk/release/app-release.apk Capri-Android.apk
+          if [ -f keystore.properties ]; then
+            # Gradle drops the v1 (JAR) signature when minSdk >= 24, but some installers (Honor
+            # MagicOS) only read v1 and refuse the APK ("does not contain any certificates").
+            # Re-sign with v1 + v2 + v3.
+            PW=$(grep '^storePassword=' keystore.properties | cut -d= -f2-)
+            $BT/zipalign -f -p 4 Capri-Android.apk aligned.apk
+            $BT/apksigner sign --ks release.jks --ks-pass "pass:$PW" --ks-key-alias flowframes \
+              --key-pass "pass:$PW" --min-sdk-version 21 --v1-signing-enabled true \
+              --v2-signing-enabled true --v3-signing-enabled true --out Capri-Android.apk aligned.apk
+            rm -f aligned.apk Capri-Android.apk.idsig
+          fi
+          $BT/apksigner verify --verbose --print-certs --min-sdk-version 21 Capri-Android.apk | head -8
+          $BT/apksigner verify --min-sdk-version 21 -v Capri-Android.apk | grep -q "v1 scheme (JAR signing): true" || [ ! -f keystore.properties ]
+          ls -l Capri-Android.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: FlowFrames-Android-apk
-          path: |
-            android/FlowFrames-Android.apk
-            android/Capri-Android.apk
+          name: Capri-Android-apk
+          path: android/Capri-Android.apk
       - name: Resolve the release tag
         if: startsWith(github.ref, 'refs/tags/android-v') || startsWith(github.ref, 'refs/heads/release/')
         run: |
@@ -85,58 +82,27 @@ jobs:
           # Pushed from a branch (which cannot carry a tag): create the tag at this commit.
           tag_name: ${{ env.RELEASE_TAG }}
           target_commitish: ${{ github.sha }}
-          files: |
-            android/FlowFrames-Android.apk
-            android/Capri-Android.apk
+          files: android/Capri-Android.apk
           prerelease: true
-          name: FlowFrames Android ${{ env.RELEASE_TAG }}
+          name: Capri ${{ env.RELEASE_TAG }}
           body: |
-            Deux APK arm64 dans cette release :
+            Un seul APK arm64 dans cette release : **Capri-Android.apk**. L'édition historique
+            FlowFrames disparaît — Capri est désormais l'application, avec son identifiant
+            `com.flowframes.android.capri`, donc la mise à jour se fait par-dessus la 1.7.x.
 
-            * **FlowFrames-Android.apk** — l'application historique : interpolation RIFE sur le GPU via
-              ncnn + Vulkan, repli automatique sur le CPU si le pilote échoue.
-            * **Capri-Android.apk** — l'édition Capri : palette Material You du système (couleurs tirées
-              du fond d'écran sur Android 12+), logo et icônes à elle, cartes arrondies, en-tête fin et
-              file d'attente qui ne se chevauche plus sur un petit écran. Mêmes moteurs et mêmes
-              réglages ; elle s'installe à côté de FlowFrames (identifiant distinct), les deux peuvent
-              donc coexister.
+            Nouveau en 1.8.0 : un onglet **Create** pour la génération d'images sur l'appareil.
+            Les modèles ne sont pas dans l'APK : on importe un checkpoint (.safetensors, .ckpt ou
+            .gguf — SD 1.5, SDXL, SD-Turbo, LCM) depuis le stockage du téléphone, il est copié dans
+            le dossier privé de l'application, puis le moteur stable-diffusion.cpp (ggml, CPU) rend
+            l'image en local, sans réseau. Prompt, prompt négatif, taille, étapes, CFG, sampler et
+            graine sont réglables, la progression s'affiche pas à pas, et le PNG part dans
+            Download/capri (MediaStore, sans permission de stockage). L'onglet Studio garde
+            l'interpolation RIFE et l'onglet Settings ses réglages.
 
-            Les deux APK sont signés (v1 + v2 + v3, compatible avec l'installateur Honor) avec la clé de
-            release FlowFrames : inutile de les re-signer. Désinstaller une fois l'ancienne version si
-            Android refuse l'installation (clé différente).
+            Le build natif récupère stable-diffusion.cpp à une version épinglée (tag
+            `master-1024-77b72a2`) et le compile pour arm64 avec le NDK : la première compilation
+            est plus longue, les suivantes sont mises en cache par Gradle.
 
-            Depuis la 1.6.6, le moteur GPU est préparé au démarrage de l'application : le premier
-            lancement compile les shaders et convertit les poids en arrière-plan, puis chaque
-            interpolation démarre immédiatement. Les inférences parallèles se règlent avec un curseur
-            (2 par défaut).
-
-            Nouveau en 1.7.4 : Capri perd la barre lumineuse sous le titre et gagne une voie lactée
-            animée à la place du champ d'étoiles — nébuleuse en trois halos, bande laiteuse inclinée,
-            trois couches d'étoiles qui scintillent et des météores qui traversent le ciel. Les cartes
-            de la file ne se chevauchent plus (le « Total time » s'affichait par-dessus le nom du
-            fichier), l'anneau de progression laisse la place à une barre d'avancement en vague avec
-            son pourcentage, et la barre de navigation est noire. Côté moteur, fp16 et cooperative
-            matrix sont activés par défaut sur Capri (FlowFrames garde ses réglages sûrs), et la vidéo
-            sort dans Download/capri, créé automatiquement, sans permission de stockage.
-
-            Nouveau en 1.7.3 : Capri passe en noir OLED — fond, cartes, barres et panneau de log sont
-            noirs, un champ d'étoiles discret anime l'arrière-plan, le dégradé ne reste que dans les
-            lettres de CAPRI et dans une barre lumineuse vide placée dessous. La poubelle à côté du
-            titre disparaît, et les textes longs (résumé du moteur, modèle, métadonnées, ligne système)
-            ne se coupent plus. Le décodage est aussi 20 à 50 % plus rapide selon que la source est
-            déjà à la résolution cible ou doit être redimensionnée.
-
-            Nouveau en 1.7.2 : le menu principal est découpé en trois bandes — le dégradé ne couvre
-            plus que le logo et le mot CAPRI, les réglages du moteur passent dans une barre Material You,
-            et la lecture système n'affiche plus que la RAM et la température de la batterie (CPU, GPU,
-            NPU, mémoire de l'app et headroom sont réservés à la vue avancée).
-
-            Nouveau en 1.7.1 : retour à l'interface Capri de la 1.6.6, avec les deux défauts du menu
-            principal corrigés — l'en-tête dégradé passe d'environ 180 dp à environ 80 dp (plus de gros
-            bloc lumineux) et les cartes de la file ne peuvent plus se chevaucher (le nom a sa ligne,
-            l'état et les métadonnées la suivante, tronqués proprement).
-
-            Le moteur de la 1.7.0 reste : les trois conversions de pixels de chaque image générée (deux
-            entrées ARGB, une sortie) sont réparties sur plusieurs threads au lieu de s'enchaîner — 58 %
-            de ce coût CPU en moins en 1080p, 68 % en 4K (mesuré sur machine hôte, sur les boucles exactes
-            du téléphone).
+            Signature v1 + v2 + v3 avec la clé de release Capri/FlowFrames : inutile de re-signer.
+            Désinstaller une fois l'ancienne version si Android refuse l'installation (clé
+            différente).

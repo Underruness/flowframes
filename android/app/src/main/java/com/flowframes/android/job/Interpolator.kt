@@ -11,7 +11,6 @@ import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import android.provider.MediaStore
 import androidx.documentfile.provider.DocumentFile
-import com.flowframes.android.BuildConfig
 import com.flowframes.android.core.DeviceInfo
 import com.flowframes.android.core.IntArrayPool
 import com.flowframes.android.core.FrameMath
@@ -699,7 +698,7 @@ class Interpolator(
         }
         // Capri writes into Download/capri through MediaStore: the folder appears by itself and no
         // storage permission is needed on Android 10+. Older phones keep the app folder below.
-        if (BuildConfig.EDITION_CAPRI && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             createInDownloads(baseName)?.let { return it }
         }
         val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES), "FlowFrames").apply { mkdirs() }

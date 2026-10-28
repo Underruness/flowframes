@@ -216,7 +216,7 @@ private fun CapriHero(settings: Settings) {
  * lines: no bitmap, no per-star allocation.
  */
 @Composable
-private fun CosmicBackground(modifier: Modifier = Modifier) {
+internal fun CosmicBackground(modifier: Modifier = Modifier) {
     val sky = remember { buildSky() }
     val transition = rememberInfiniteTransition(label = "cosmos")
     val twinkle by transition.animateFloat(
@@ -629,7 +629,7 @@ private fun JobCard(job: JobItem, canRemove: Boolean, onRemove: () -> Unit, modi
  * rectangle. The fraction is animated, so a jump in the job does not jump on the screen.
  */
 @Composable
-private fun WaveProgressBar(fraction: Float, color: Color, modifier: Modifier = Modifier) {
+internal fun WaveProgressBar(fraction: Float, color: Color, modifier: Modifier = Modifier) {
     val target by animateFloatAsState(
         targetValue = fraction.coerceIn(0f, 1f),
         animationSpec = tween(600, easing = FastOutSlowInEasing),

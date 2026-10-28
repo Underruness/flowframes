@@ -117,7 +117,7 @@ class JobStore {
     fun pendingCount(): Int = jobs.value.count { it.status == JobStatus.QUEUED || it.status == JobStatus.RUNNING }
 }
 
-/** Tiny service locator, initialised by [com.flowframes.android.FlowFramesApp]. */
+/** Tiny service locator, initialised by [com.flowframes.android.CapriApp]. */
 object AppGraph {
     lateinit var settings: SettingsStore
         private set

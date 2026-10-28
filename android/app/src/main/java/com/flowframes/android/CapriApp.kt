@@ -7,7 +7,7 @@ import com.flowframes.android.job.AppGraph
 import com.flowframes.android.job.EngineWarmup
 import com.flowframes.android.job.SettingsStore
 
-class FlowFramesApp : Application() {
+class CapriApp : Application() {
     override fun onCreate() {
         super.onCreate()
         // First: every later log line and any crash end up in files/logs.

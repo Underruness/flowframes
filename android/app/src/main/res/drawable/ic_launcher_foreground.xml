@@ -3,19 +3,17 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- The "C" of Capri: an open ring in electric yellow. -->
     <path
-        android:fillColor="#7C6CF5"
-        android:pathData="M24,44 h14 v20 h-14 z" />
+        android:pathData="M74,33 A28,28 0 1 0 74,75"
+        android:strokeColor="#F3E24B"
+        android:strokeWidth="9"
+        android:strokeLineCap="round" />
+    <!-- The frame RIFE generates between two others. -->
     <path
-        android:fillColor="#E8E4FF"
-        android:pathData="M47,48 h14 v12 h-14 z" />
+        android:fillColor="#4BE1F5"
+        android:pathData="M45,40 L69,54 L45,68 Z" />
     <path
-        android:fillColor="#7C6CF5"
-        android:pathData="M70,44 h14 v20 h-14 z" />
-    <path
-        android:fillColor="#B9AFFF"
-        android:pathData="M54,24 L63,33 H57 V39 H51 V33 H45 Z" />
-    <path
-        android:fillColor="#B9AFFF"
-        android:pathData="M54,84 L45,75 H51 V69 H57 V75 H63 Z" />
+        android:fillColor="#F54B94"
+        android:pathData="M54,15 L59,22 L54,29 L49,22 Z" />
 </vector>

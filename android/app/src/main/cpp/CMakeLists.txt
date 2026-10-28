@@ -1,12 +1,16 @@
-# Native RIFE engine: ncnn (Vulkan GPU + ARM CPU) behind a small JNI surface.
+# Native engines behind two JNI surfaces:
+#   * flowframes_rife: RIFE interpolation (ncnn Vulkan + ARM CPU, prebuilt below)
+#   * capri_diffusion:  local image generation (stable-diffusion.cpp / ggml, CPU)
 cmake_minimum_required(VERSION 3.18)
-project(flowframes_rife CXX)
+project(capri_native C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ncnn prebuilt release (static, Vulkan through simplevk: libvulkan is loaded at runtime, so the
-# library also loads on phones without Vulkan and falls back to the CPU).
+# ---------------------------------------------------------------------------------------------
+# RIFE: ncnn prebuilt release (static, Vulkan through simplevk: libvulkan is loaded at runtime,
+# so the library also loads on phones without Vulkan and falls back to the CPU).
+# ---------------------------------------------------------------------------------------------
 set(NCNN_VERSION 20261020)
 set(NCNN_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/ncnn-android CACHE PATH "Unpacked ncnn-<ver>-android-vulkan")
 if(NOT EXISTS ${NCNN_ROOT}/${ANDROID_ABI}/lib/cmake/ncnn/ncnnConfig.cmake)
@@ -40,3 +44,40 @@ target_link_options(flowframes_rife PRIVATE -Wl,--gc-sections -Wl,--exclude-libs
     # through shader_cache.cpp (libc++ mangling, see FF_COMPILE_SYM there).
     -Wl,--wrap=_ZN4ncnn20compile_spirv_moduleEiRKNS_6OptionERNSt6__ndk16vectorIjNS3_9allocatorIjEEEE)
 target_link_libraries(flowframes_rife ncnn android log)
+
+# ---------------------------------------------------------------------------------------------
+# Diffusion: stable-diffusion.cpp pinned to a tag, fetched at configure time (same idea as the
+# ncnn prebuilt above: no third-party source in the repository). CPU backend only for now.
+# ---------------------------------------------------------------------------------------------
+include(FetchContent)
+
+set(SD_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(SD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(SD_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(SD_WEBP OFF CACHE BOOL "" FORCE)
+set(SD_WEBM OFF CACHE BOOL "" FORCE)
+set(SD_VULKAN OFF CACHE BOOL "" FORCE)
+set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
+set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)
+# ggml targets phone cores: keep the dot-product / i8mm / fp16 kernels it detects at compile time.
+set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+set(GGML_CPU_ARM_ARCH "" CACHE STRING "" FORCE)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+FetchContent_Declare(
+    sdcpp
+    GIT_REPOSITORY https://github.com/leejet/stable-diffusion.cpp.git
+    GIT_TAG        master-1024-77b72a2
+    GIT_SHALLOW    TRUE
+    GIT_SUBMODULES ggml
+    GIT_PROGRESS   TRUE)
+FetchContent_MakeAvailable(sdcpp)
+
+add_library(capri_diffusion SHARED diffusion_jni.cpp)
+target_include_directories(capri_diffusion PRIVATE ${sdcpp_SOURCE_DIR}/include)
+target_compile_options(capri_diffusion PRIVATE -O3)
+target_link_options(capri_diffusion PRIVATE
+    -Wl,--gc-sections
+    -Wl,--exclude-libs,ALL
+    -Wl,-z,max-page-size=16384)
+target_link_libraries(capri_diffusion stable-diffusion android log)

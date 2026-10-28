@@ -1,7 +1,9 @@
-# FlowFrames Android
+# Capri Android
 
-Réimplémentation native Android du pipeline de **[FlowFrames](https://github.com/n00mkrad/flowframes)** :
-interpolation d'images vidéo par IA (RIFE), 100 % sur l'appareil, sans PC et sans internet.
+Application Android tout-en-un, 100 % sur l'appareil : interpolation de vidéo par IA (RIFE) et
+génération d'images par diffusion locale. Héritière du portage Android de
+**[FlowFrames](https://github.com/n00mkrad/flowframes)**, dont elle garde le moteur d'interpolation
+et le pipeline, sans PC et sans internet.
 
 L'application d'origine est un programme Windows (C#/.NET + binaires NCNN/CUDA). Ce module
 `android/` ne réutilise pas ce code : il refait le même pipeline avec les API Android.
@@ -15,9 +17,10 @@ vidéo source ──► MediaCodec (décodage matériel) ──► RIFE 4.9 / nc
 ## Installation
 
 L'APK signé est publié en tant qu'asset de la release GitHub :
-[`FlowFrames-Android.apk`](https://github.com/maxandre1905/flowframes/releases/latest) — construit et signé
+[`Capri-Android.apk`](https://github.com/Underruness/flowframes/releases/latest) — construit et signé
 par la CI (`.github/workflows/android-release.yml`) à chaque tag `android-v*`. Pour le compiler
-soi-même, voir « Compiler soi-même ».
+soi-même, voir « Compiler soi-même ». Le paquet reste `com.flowframes.android.capri` : la mise à
+jour se fait par-dessus les versions Capri précédentes.
 
 1. Copiez l'APK sur le téléphone (ou `adb install -r app-release.apk`).
 2. Autorisez l'installation depuis une source inconnue si Android le demande.
@@ -30,10 +33,14 @@ x86_64 ou un appareil 32 bits, voir « Compiler soi-même ».
 
 ## Utilisation
 
+L'application a trois onglets : **Studio** (interpolation), **Create** (génération d'images) et
+**Settings**.
+
 1. **Ajouter** une ou plusieurs vidéos (sélecteur système, aucun accès complet au stockage requis).
 2. Régler le facteur (`x2`, `x3`, `x4`, `x6`, `x8`) et éventuellement la résolution de traitement.
 3. **Démarrer** : le traitement tourne dans un service de premier plan, l'écran peut être éteint.
-4. Le résultat est écrit dans le dossier choisi (ou dans `Android/data/com.flowframes.android/files/Movies/FlowFrames`).
+4. Le résultat est écrit dans le dossier choisi, sinon dans `Download/capri` (MediaStore, créé
+automatiquement, sans permission de stockage sur Android 10+).
 
 Le journal intégré affiche chaque étape (modèle, décodeur, images traitées, audio, sortie).
 
@@ -115,21 +122,37 @@ Prérequis : JDK 17, Android SDK (plateforme 34, build-tools 34.0.0).
 ```bash
 cd android
 echo "sdk.dir=/chemin/vers/android-sdk" > local.properties
-./gradlew assembleRelease          # les deux APK arm64-v8a signés
+./gradlew assembleRelease                  # l'APK arm64-v8a signé
 ./gradlew assembleRelease -PallAbis=true   # + armeabi-v7a et x86_64 (émulateurs)
-./gradlew :app:assembleCapriRelease        # une seule édition
 ```
 
-Deux éditions sortent du même moteur (`flavorDimensions = "edition"`) :
+Sortie : `app/build/outputs/apk/release/app-release.apk` (`com.flowframes.android.capri`).
 
-| Édition | APK | Identifiant | Interface |
-|---|---|---|---|
-| `flowframes` | `app/build/outputs/apk/flowframes/release/app-flowframes-release.apk` | `com.flowframes.android` | l'écran historique |
-| `capri` | `app/build/outputs/apk/capri/release/app-capri-release.apk` | `com.flowframes.android.capri` | Material You (couleurs dynamiques du papier peint sur Android 12+), animations, logo Capri |
+L'interpolation est compilée dans `libflowframes_rife.so` (ncnn + Vulkan) et la génération d'images
+dans `libcapri_diffusion.so`. CMake récupère la version épinglée de
+[stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) au premier configure et la
+compile pour l'ABI visée : le premier build est plus long, les suivants reprennent sur le cache de
+Gradle (`app/.cxx`). Le NDK 30.0.16248370 et CMake 3.22.1 sont nécessaires.
 
-Le moteur, le service, les réglages et le pipeline sont dans `src/main` ; chaque édition apporte son
-`MainActivity`, son écran, son nom et son logo. Les deux identifiants étant distincts, les deux
-applications s'installent côte à côte.
+## Génération d'images (diffusion locale)
+
+L'onglet **Create** rend des images avec [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)
+(ggml, CPU), sans réseau.
+
+1. **Importer un modèle** : un checkpoint `.safetensors`, `.ckpt` ou `.gguf` (SD 1.5, SDXL,
+   SD-Turbo, LCM…) choisi dans le sélecteur système. Il est copié dans le dossier privé de
+   l'application (`files/models`), donc il continue de fonctionner après expiration de l'accès au
+   fichier d'origine. Aucun modèle n'est fourni ni téléchargé par l'application.
+2. Régler le prompt, le prompt négatif, la taille (512², 512×768, 768×512, 768²), les étapes, le
+   CFG, le sampler et la graine (`random` par défaut).
+3. **Generate** : la progression s'affiche pas à pas ; **Save** écrit un PNG dans `Download/capri`,
+   **Share** l'envoie à une autre application.
+
+Le modèle reste chargé entre deux générations (le chargement prend des dizaines de secondes) et
+est libéré quand on en change ou quand l'écran Create est fermé. Sur un téléphone, un fine-tune
+Turbo/LCM en 4 à 8 étapes reste le plus rapide ; un SD 1.5 fp16 en 20 étapes prend plusieurs
+minutes. Les modèles SDXL et les très gros GGUF demandent beaucoup de RAM : commencer bas en
+résolution et en étapes.
 
 ### Tests
 
@@ -151,7 +174,7 @@ Il est paramétrable pour les appareils lents :
 adb shell am instrument -w \
   -e width 32 -e height 32 -e frames 4 \
   -e class com.flowframes.android.PipelineEndToEndTest \
-  com.flowframes.android.debug.test/androidx.test.runner.AndroidJUnitRunner
+  com.flowframes.android.capri.debug.test/androidx.test.runner.AndroidJUnitRunner
 ```
 
 ### État de la validation

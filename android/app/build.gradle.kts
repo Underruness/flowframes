@@ -17,11 +17,11 @@ android {
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.flowframes.android"
+        applicationId = "com.flowframes.android.capri"
         minSdk = 26
         targetSdk = 34
-        versionCode = 20
-        versionName = "1.7.4"
+        versionCode = 21
+        versionName = "1.8.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Ship 64-bit ARM by default (every Android phone since ~2016).
@@ -33,29 +33,6 @@ android {
         ndk {
             abiFilters += explicitAbis
                 ?: if (allAbis) listOf("arm64-v8a", "armeabi-v7a", "x86_64") else listOf("arm64-v8a")
-        }
-    }
-
-    /**
-     * Two editions from one engine. `flowframes` is the historical app, with its own application id
-     * so it updates over 1.6.5; `capri` is the redesigned Material You edition, with a distinct id,
-     * so both install side by side. Shared pipeline code lives in `src/main`, each edition owns its
-     * `MainActivity` and its Compose UI, name, icon and window theme.
-     */
-    flavorDimensions += "edition"
-
-    productFlavors {
-        create("flowframes") {
-            dimension = "edition"
-            applicationId = "com.flowframes.android"
-            buildConfigField("boolean", "EDITION_CAPRI", "false")
-            buildConfigField("boolean", "EDITION_FP16_DEFAULT", "false")
-        }
-        create("capri") {
-            dimension = "edition"
-            applicationId = "com.flowframes.android.capri"
-            buildConfigField("boolean", "EDITION_CAPRI", "true")
-            buildConfigField("boolean", "EDITION_FP16_DEFAULT", "true")
         }
     }
 
@@ -89,7 +66,8 @@ android {
         }
     }
 
-    // Native RIFE engine (ncnn + Vulkan). CMake downloads the ncnn prebuilt on the first build.
+    // Native engines: RIFE interpolation (ncnn + Vulkan) and local diffusion (stable-diffusion.cpp).
+    // CMake downloads the ncnn prebuilt and the diffusion sources on the first build.
     ndkVersion = "30.0.16248370"
     externalNativeBuild {
         cmake {
@@ -100,8 +78,6 @@ android {
 
     buildFeatures {
         compose = true
-        // Per-edition defaults (Capri: fp16 on, output in Download/capri) are compiled in.
-        buildConfig = true
     }
 
     composeOptions {

@@ -1,7 +1,6 @@
 package com.flowframes.android.job
 
 import android.content.Context
-import com.flowframes.android.BuildConfig
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -71,13 +70,13 @@ data class Settings(
     val engine: EngineKind = EngineKind.NCNN_GPU,
     val ncnnModel: NcnnModel = NcnnModel.V4_6,
     /**
-     * ncnn fp16 arithmetic. Off by default: on a Snapdragon 8 Elite it failed (benchmark stuck), the
-     * suspect being ncnn's Adreno cooperative-matrix kernels, now disabled separately ([coopMatrix]).
+     * ncnn fp16 arithmetic. On by default since Capri is the only edition; the benchmark stays the
+     * arbiter and turning it off is the safe fallback on an Adreno driver that stalls.
      * fp16 *storage* stays on, which is what the 6 fps measurement used.
      */
-    val fp16: Boolean = BuildConfig.EDITION_FP16_DEFAULT,
+    val fp16: Boolean = true,
     /** Cooperative-matrix kernels for fp16 math; experimental on Adreno. */
-    val coopMatrix: Boolean = BuildConfig.EDITION_FP16_DEFAULT,
+    val coopMatrix: Boolean = true,
     /**
      * Hybrid mode: while the GPU computes most phases, CPU workers (ncnn, same model) take some
      * as well. Every worker pulls the next phase from one queue, so the split follows the speeds.
@@ -161,9 +160,7 @@ class SettingsStore(context: Context) {
                 .putInt("parallelInferences", d.workers)
                 .putString("codec", d.codec.name)
                 .putInt("bitratePreset", d.bitratePreset)
-            if (BuildConfig.EDITION_FP16_DEFAULT) {
-                edit.putBoolean("fp16Arith", true).putBoolean("coopMatrix", true)
-            }
+            edit.putBoolean("fp16Arith", true).putBoolean("coopMatrix", true)
             edit.putInt("defaultsVersion", DEFAULTS_VERSION).apply()
         }
         return Settings(

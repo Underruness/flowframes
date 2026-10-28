@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.FlowFrames" parent="android:Theme.Material.NoActionBar">
-        <item name="android:windowBackground">#0E0D14</item>
-        <item name="android:statusBarColor">#0E0D14</item>
-        <item name="android:navigationBarColor">#0E0D14</item>
+    <!-- Same style name as the historical edition (the manifest refers to it); Capri draws its own
+         surface on top. Pure black: the window and the launch screen must match the OLED surfaces
+         the app paints, so nothing flashes grey on start. -->
+    <style name="Theme.Capri" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#000000</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>
