@@ -72,11 +72,16 @@ jobs:
             echo "::error title=AVD::creation impossible — $(ls -la $ANDROID_HOME 2>&1 | tr '\n' '|' | head -c 400)"
             exit 1
           fi
-          # 2 GB of RAM: Compose plus MediaCodec are heavier than the default profile.
-          printf 'hw.ramSize=2048\nhw.keyboard=yes\ndisk.dataPartition.size=4096M\n' \
-            >> "$HOME/.android/avd/$AVD_NAME.avd/config.ini"
-          echo "::notice title=avd config::$(grep -E 'hw.ramSize|hw.keyboard|image.sysdir|hw.lcd.width' \
-            "$HOME/.android/avd/$AVD_NAME.avd/config.ini" | tr '\n' ' ')"
+          # 2 GB of RAM: Compose plus MediaCodec are heavier than the default profile. The file is
+          # looked up instead of assumed: avdmanager on the runner did not write it where $HOME and
+          # $AVD_NAME said it would.
+          cfg=$(find "$HOME/.android" -name config.ini -path "*$AVD_NAME*" 2>/dev/null | head -1)
+          if [ -z "$cfg" ]; then
+            echo "::error title=avd config::introuvable sous $HOME/.android — $(ls -laR "$HOME/.android" 2>&1 | tr '\n' '|' | head -c 500)"
+            exit 1
+          fi
+          printf 'hw.ramSize=2048\nhw.keyboard=yes\ndisk.dataPartition.size=4096M\n' >> "$cfg"
+          echo "::notice title=avd config::$cfg — $(grep -E 'hw.ramSize|hw.keyboard|image.sysdir|hw.lcd.width' "$cfg" | tr '\n' ' ')"
 
       - name: Boot the emulator
         run: |

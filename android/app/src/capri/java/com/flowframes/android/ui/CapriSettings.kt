@@ -396,7 +396,8 @@ fun CapriSettingsScreen(
             }) { Text("Clear GPU shader cache", fontSize = 12.sp) }
             Spacer(Modifier.height(2.dp))
             Text(
-                "Capri 1.6.6 - RIFE 4.9 / 4.6 models (MIT) - ncnn (BSD-3) - MediaCodec for decoding and encoding.",
+                "Capri 1.7.0 — RIFE 4.9 / 4.6 models (MIT) · ncnn (BSD-3) · MediaCodec for decoding " +
+                    "and encoding · Chakra Petch typeface (OFL).",
                 fontSize = 11.5.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

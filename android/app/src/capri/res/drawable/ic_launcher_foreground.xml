@@ -3,17 +3,53 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- The "C" of Capri: an open ring in electric yellow. -->
+    <!-- Violet rim shard, bottom left. -->
     <path
-        android:pathData="M74,33 A28,28 0 1 0 74,75"
-        android:strokeColor="#F3E24B"
-        android:strokeWidth="9"
-        android:strokeLineCap="round" />
-    <!-- The frame RIFE generates between two others. -->
+        android:fillColor="#8755FF"
+        android:pathData="M10,92 L30,64 L26,96 Z" />
+    <!-- Green shard, top right. -->
     <path
-        android:fillColor="#4BE1F5"
-        android:pathData="M45,40 L69,54 L45,68 Z" />
+        android:fillColor="#2BE85C"
+        android:pathData="M98,14 L80,34 L100,30 Z" />
+    <!-- The black spiky head. -->
     <path
-        android:fillColor="#F54B94"
-        android:pathData="M54,15 L59,22 L54,29 L49,22 Z" />
+        android:fillColor="#08060C"
+        android:pathData="M54,14 L66,30 L82,18 L74,36 L96,42 L76,54 L94,70 L70,72 L74,94 L54,78 L34,94 L38,72 L14,70 L32,54 L12,42 L34,36 L26,18 L42,30 Z" />
+    <!-- White glint on the crest. -->
+    <path
+        android:fillColor="#FFF4FA"
+        android:pathData="M54,14 L61,28 L47,28 Z" />
+    <!-- Neon green eye mask. -->
+    <path
+        android:fillColor="#2BE85C"
+        android:pathData="M17,50 L91,55 L86,71 L21,67 Z" />
+    <!-- Left eye: white, electric blue, black pupil, white glint. -->
+    <path
+        android:fillColor="#FFF4FA"
+        android:pathData="M40,60 m-10,0 a10,10 0 1,0 20,0 a10,10 0 1,0 -20,0" />
+    <path
+        android:fillColor="#1A9DFF"
+        android:pathData="M40,60 m-6.6,0 a6.6,6.6 0 1,0 13.2,0 a6.6,6.6 0 1,0 -13.2,0" />
+    <path
+        android:fillColor="#08060C"
+        android:pathData="M40,60 m-3.6,0 a3.6,3.6 0 1,0 7.2,0 a3.6,3.6 0 1,0 -7.2,0" />
+    <path
+        android:fillColor="#FFF4FA"
+        android:pathData="M37.6,56.6 m-1.5,0 a1.5,1.5 0 1,0 3,0 a1.5,1.5 0 1,0 -3,0" />
+    <!-- Right eye, smaller. -->
+    <path
+        android:fillColor="#FFF4FA"
+        android:pathData="M71,62 m-7,0 a7,7 0 1,0 14,0 a7,7 0 1,0 -14,0" />
+    <path
+        android:fillColor="#1A9DFF"
+        android:pathData="M71,62 m-4.4,0 a4.4,4.4 0 1,0 8.8,0 a4.4,4.4 0 1,0 -8.8,0" />
+    <path
+        android:fillColor="#08060C"
+        android:pathData="M71,62 m-2.4,0 a2.4,2.4 0 1,0 4.8,0 a2.4,2.4 0 1,0 -4.8,0" />
+    <!-- White zigzag mouth. -->
+    <path
+        android:strokeColor="#FFF4FA"
+        android:strokeWidth="3.4"
+        android:strokeLineCap="round"
+        android:pathData="M42,80 L48,74 L54,83 L60,76 L66,81" />
 </vector>
