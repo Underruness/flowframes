@@ -347,3 +347,465 @@ private fun CapriEmptyState(onAdd: () -> Unit) {
         GradientButton(text = "Choose videos", icon = Icons.Filled.Add, onClick = onAdd, enabled = true)
     }
 }
+
+@Composable
+private fun JobCard(job: JobItem, canRemove: Boolean, onRemove: () -> Unit, modifier: Modifier = Modifier) {
+    val accent = statusColor(job.status)
+    val running = job.status == JobStatus.RUNNING
+    val sweep by animateFloatAsState(
+        targetValue = job.progress.coerceIn(0f, 1f) * 360f,
+        animationSpec = tween(600, easing = FastOutSlowInEasing),
+        label = "job-progress"
+    )
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(26.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .border(
+                width = 1.dp,
+                brush = if (running) {
+                    Brush.linearGradient(listOf(CapriYellow.copy(alpha = 0.8f), CapriCyan.copy(alpha = 0.6f)))
+                } else {
+                    Brush.linearGradient(listOf(MaterialTheme.colorScheme.outline, MaterialTheme.colorScheme.outline))
+                },
+                shape = RoundedCornerShape(26.dp)
+            )
+            .padding(14.dp)
+    ) {
+        Row(verticalAlignment = Alignment.Top) {
+            Canvas(modifier = Modifier.size(46.dp)) {
+                val stroke = Stroke(width = size.minDimension * 0.13f, cap = StrokeCap.Round)
+                val inset = stroke.width / 2f
+                val box = Size(size.width - stroke.width, size.height - stroke.width)
+                drawArc(
+                    color = accent.copy(alpha = 0.18f),
+                    startAngle = -90f,
+                    sweepAngle = 360f,
+                    useCenter = false,
+                    topLeft = Offset(inset, inset),
+                    size = box,
+                    style = stroke
+                )
+                drawArc(
+                    color = accent,
+                    startAngle = -90f,
+                    sweepAngle = sweep,
+                    useCenter = false,
+                    topLeft = Offset(inset, inset),
+                    size = box,
+                    style = stroke
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                // The name gets its own line (the remove button only competes with it), and the
+                // badge moved to the line below with the metadata: nothing has to share a few dp
+                // any more, which is what used to push the name under the badge on a small screen.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        job.displayName,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.5.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (canRemove) {
+                        IconButton(onClick = onRemove, modifier = Modifier.size(26.dp)) {
+                            Icon(
+                                Icons.Filled.Close,
+                                contentDescription = "Remove",
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(5.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    StatusBadge(job.status, accent)
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        metaLine(job),
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+        job.detail.takeIf { it.isNotEmpty() }?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                it,
+                fontSize = 11.5.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        job.error?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(it, fontSize = 11.5.sp, color = CapriDanger, maxLines = 3, overflow = TextOverflow.Ellipsis)
+        }
+        if (job.status == JobStatus.DONE && job.outputName != null) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "→ ${job.outputName}",
+                fontSize = 11.5.sp,
+                color = CapriMint,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        JobTimer(job)
+    }
+}
+
+/** The state of a job as a pill that never wraps and never takes more than one line. */
+@Composable
+private fun StatusBadge(status: JobStatus, accent: Color) {
+    Text(
+        statusLabel(status),
+        color = accent,
+        fontSize = 10.5.sp,
+        fontWeight = FontWeight.Bold,
+        maxLines = 1,
+        softWrap = false,
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(accent.copy(alpha = 0.14f))
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    )
+}
+
+/** "1920x1080 · 30 fps · 12s", on one line whatever the numbers are. */
+private fun metaLine(job: JobItem): String {
+    val info = job.info ?: return "metadata unavailable"
+    return "${info.displayWidth}x${info.displayHeight} · " +
+        String.format(Locale.US, "%.2f", info.fps).trimEnd('0').trimEnd('.') + " fps · " +
+        formatDuration(info.durationSeconds)
+}
+
+/** Elapsed time, estimate and end time while running; total time once finished. */
+@Composable
+private fun JobTimer(job: JobItem) {
+    if (job.startedAtMs <= 0L) return
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    var etaFrom by remember(job.id, job.startedAtMs) { mutableStateOf<Pair<Long, Float>?>(null) }
+    if (job.status == JobStatus.RUNNING) {
+        LaunchedEffect(job.id, job.startedAtMs) {
+            while (true) {
+                now = System.currentTimeMillis()
+                kotlinx.coroutines.delay(1000)
+            }
+        }
+        if (etaFrom == null && job.progress > 0f) etaFrom = System.currentTimeMillis() to job.progress
+    }
+    val text = when {
+        job.status == JobStatus.RUNNING -> {
+            val eta = etaFrom?.let { estimateRemainingMs(now, it.first, it.second, job.progress) }
+            "Elapsed " + formatClock(now - job.startedAtMs) +
+                if (eta != null) {
+                    " · ETA " + formatClock(eta) + " · ends ~" +
+                        java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(java.util.Date(now + eta))
+                } else " · ETA computing…"
+        }
+        job.finishedAtMs > 0L -> "Total time " + formatClock(job.finishedAtMs - job.startedAtMs)
+        else -> return
+    }
+    Spacer(Modifier.height(8.dp))
+    Text(
+        text,
+        fontSize = 11.5.sp,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.primary,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis
+    )
+}
+
+/** Add / start / cancel, always at hand. */
+@Composable
+private fun ActionBar(running: Boolean, canStart: Boolean, onAdd: () -> Unit, onStart: () -> Unit, onCancel: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        GhostButton(
+            text = "Add videos",
+            icon = Icons.Filled.Add,
+            onClick = onAdd,
+            enabled = !running,
+            modifier = Modifier.weight(1f)
+        )
+        GradientButton(
+            text = if (running) "Cancel" else "Interpolate",
+            icon = if (running) Icons.Filled.Stop else Icons.Filled.PlayArrow,
+            onClick = if (running) onCancel else onStart,
+            enabled = running || canStart,
+            modifier = Modifier.weight(1f),
+            danger = running
+        )
+    }
+}
+
+@Composable
+private fun GradientButton(
+    text: String,
+    icon: ImageVector,
+    onClick: () -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    danger: Boolean = false
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed && enabled) 0.96f else 1f, label = "press")
+    val brush = when {
+        !enabled -> Brush.linearGradient(listOf(Color(0xFF35324A), Color(0xFF35324A)))
+        danger -> Brush.linearGradient(listOf(CapriDanger, CapriMagenta))
+        else -> Brush.linearGradient(listOf(CapriYellow, CapriCyan))
+    }
+    Row(
+        modifier = modifier
+            .scale(scale)
+            .clip(RoundedCornerShape(22.dp))
+            .background(brush)
+            .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 15.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp), tint = CapriInk)
+        Spacer(Modifier.width(7.dp))
+        Text(
+            text,
+            color = CapriInk,
+            fontWeight = FontWeight.Bold,
+            fontSize = 14.sp,
+            maxLines = 1
+        )
+    }
+}
+
+@Composable
+private fun GhostButton(
+    text: String,
+    icon: ImageVector,
+    onClick: () -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed && enabled) 0.96f else 1f, label = "press")
+    Row(
+        modifier = modifier
+            .scale(scale)
+            .clip(RoundedCornerShape(22.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(22.dp))
+            .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 15.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+            tint = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline
+        )
+        Spacer(Modifier.width(7.dp))
+        Text(
+            text,
+            color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 14.sp,
+            maxLines = 1
+        )
+    }
+}
+
+/**
+ * Bar three, the readout: RAM and the battery temperature, refreshed every 2 s (5 s when idle).
+ *
+ * Only those two are always worth the space. The CPU, GPU and NPU zones, the app memory split, the
+ * thermal state and the headroom are developer numbers: they show up in the advanced view.
+ */
+@Composable
+private fun SystemStrip(running: Boolean, advanced: Boolean) {
+    val context = LocalContext.current
+    var snap by remember { mutableStateOf<SystemMonitor.Snapshot?>(null) }
+    LaunchedEffect(running) {
+        while (true) {
+            snap = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching { SystemMonitor.sample(context) }.getOrNull()
+            }
+            kotlinx.coroutines.delay(if (running) 2000 else 5000)
+        }
+    }
+    val s = snap ?: return
+    fun t(v: Double?) = if (v == null) "n/a" else String.format(Locale.US, "%.0f°", v)
+    val neutral = MaterialTheme.colorScheme.onSurfaceVariant
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 18.dp, vertical = 10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "RAM",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                String.format(
+                    Locale.US,
+                    "%.1f/%.1f GB",
+                    (s.sysTotalMb - s.sysAvailMb) / 1024.0,
+                    s.sysTotalMb / 1024.0
+                ) + if (s.lowMemory) " · LOW" else "",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = if (s.lowMemory) CapriDanger else neutral
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                "Battery ${t(s.batteryC)}",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = when {
+                    s.batteryC == null -> neutral
+                    s.batteryC >= 48 -> CapriDanger
+                    s.batteryC >= 42 -> CapriWarn
+                    else -> neutral
+                }
+            )
+        }
+        if (advanced) {
+            Spacer(Modifier.height(5.dp))
+            Text(
+                buildString {
+                    append("CPU ${t(s.cpuC)} · GPU ${t(s.gpuC)} · NPU ${t(s.npuC)}")
+                    append(" · app ${s.appPssMb} MB (gpu ${s.graphicsMb})")
+                    s.headroom?.let { append(String.format(Locale.US, " · headroom %.0f%%", it * 100)) }
+                    s.thermal.takeIf { it.isNotEmpty() && it != "none" }?.let { append(" · $it") }
+                },
+                fontSize = 10.5.sp,
+                color = neutral,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+/** Collapsible log: the same lines the files get, colour-coded by kind. */
+@Composable
+private fun LogPanel(logs: List<String>, onCopy: () -> Unit, onShare: () -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    val listState = rememberLazyListState()
+    LaunchedEffect(logs.size, expanded) {
+        if (expanded && logs.isNotEmpty()) listState.animateScrollToItem(logs.size - 1)
+    }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Divider(color = MaterialTheme.colorScheme.outline)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Log", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            TextButton(onClick = onCopy, enabled = logs.isNotEmpty()) { Text("Copy", fontSize = 12.sp) }
+            TextButton(onClick = onShare, enabled = logs.isNotEmpty()) { Text("Share", fontSize = 12.sp) }
+            TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Hide" else "Show", fontSize = 12.sp) }
+        }
+        AnimatedVisibility(
+            visible = expanded,
+            enter = expandVertically(animationSpec = tween(220)),
+            exit = shrinkVertically(animationSpec = tween(180))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 200.dp)
+                    .background(Color(0xFF08070F))
+            ) {
+                if (logs.isEmpty()) {
+                    Text(
+                        "No events yet",
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(12.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    LazyColumn(state = listState, contentPadding = PaddingValues(12.dp)) {
+                        items(logs) { line ->
+                            Text(
+                                line,
+                                fontSize = 10.5.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = lineColor(line)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun lineColor(line: String): Color = when {
+    line.contains("✖") -> CapriDanger
+    line.contains("⚠") -> CapriWarn
+    line.contains("✔") -> CapriMint
+    line.contains("▶") || line.contains("■") -> CapriCyan
+    else -> Color(0xFFB9D9C8)
+}
+
+private fun statusColor(status: JobStatus): Color = when (status) {
+    JobStatus.QUEUED -> Color(0xFF9A94B8)
+    JobStatus.RUNNING -> CapriCyan
+    JobStatus.DONE -> CapriMint
+    JobStatus.FAILED -> CapriDanger
+    JobStatus.CANCELLED -> CapriWarn
+}
+
+private fun statusLabel(status: JobStatus): String = when (status) {
+    JobStatus.QUEUED -> "queued"
+    JobStatus.RUNNING -> "running"
+    JobStatus.DONE -> "done"
+    JobStatus.FAILED -> "failed"
+    JobStatus.CANCELLED -> "cancelled"
+}
+
+internal fun resolutionLabel(settings: Settings): String = when (settings.maxLongSide) {
+    0 -> "source resolution"
+    854 -> "480p"
+    1280 -> "720p"
+    1920 -> "1080p"
+    2560 -> "1440p"
+    3840 -> "4K"
+    else -> "${settings.maxLongSide} px"
+}
+
+internal fun fpsLabel(fps: Double): String =
+    if (fps % 1.0 == 0.0) String.format(Locale.US, "%.0f", fps)
+    else String.format(Locale.US, "%.3f", fps).trimEnd('0').trimEnd('.')
+
+private fun formatDuration(seconds: Double): String {
+    if (seconds <= 0) return "0 s"
+    val total = seconds.toInt()
+    val m = total / 60
+    val s = total % 60
+    return if (m > 0) "${m}m ${s}s" else "${s}s"
+}
