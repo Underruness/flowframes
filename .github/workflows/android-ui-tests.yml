@@ -1,6 +1,6 @@
 name: Android UI tests
 
-# Runs the instrumented Compose smoke tests (FlowFrames + Capri) on a real Android emulator, so a
+# Runs the instrumented Compose smoke tests (Capri) on a real Android emulator, so a
 # release never ships an UI that does not even inflate. The emulator needs KVM: the machine that
 # builds the APKs has none (and no emulator package), so these tests can only run here.
 #
@@ -123,7 +123,7 @@ jobs:
           cd android
           chmod +x gradlew
           set +e
-          ./gradlew --no-daemon connectedFlowframesDebugAndroidTest connectedCapriDebugAndroidTest \
+          ./gradlew --no-daemon connectedDebugAndroidTest \
             -Pabis=x86_64 \
             -Pandroid.testInstrumentationRunnerArguments.class=com.flowframes.android.UiSmokeTest \
             > /tmp/gradle-tests.log 2>&1
