@@ -38,7 +38,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
@@ -67,6 +66,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -99,13 +99,21 @@ fun CapriStudio(
     onAdd: () -> Unit,
     onStart: () -> Unit,
     onCancel: () -> Unit,
-    onClearFinished: () -> Unit,
     onCopyLogs: () -> Unit,
     onShareLogs: () -> Unit,
     onRemove: (String) -> Unit
 ) {
-    Column(modifier = Modifier.fillMaxSize()) {
-        CapriHero(settings = settings, onClearFinished = onClearFinished)
+    // Pure black behind everything, with a quiet starfield on it: the OLED look the edition asks
+    // for, and something for the eye to rest on between the bright bars.
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        StarField()
+        Column(modifier = Modifier.fillMaxSize()) {
+        CapriHero(settings = settings)
+        LuminousBar()
         EngineBar(settings = settings, warmup = warmup)
         SystemStrip(running = running, advanced = settings.advanced)
         Box(modifier = Modifier
@@ -138,17 +146,16 @@ fun CapriStudio(
             onCancel = onCancel
         )
         LogPanel(logs = logs, onCopy = onCopyLogs, onShare = onShareLogs)
+        }
     }
 }
 
 /**
- * The bright band, wrapped around the mark and the wordmark only.
- *
- * The settings and the engine state used to sit inside this gradient; they now have their own
- * Material You bar underneath, so the colour is a signature instead of a wall of light.
+ * The wordmark: black behind it, the two lines of text, and nothing else. The colour is in the
+ * letters themselves and in the bar underneath, not in a wall of paint.
  */
 @Composable
-private fun CapriHero(settings: Settings, onClearFinished: () -> Unit) {
+private fun CapriHero(settings: Settings) {
     val transition = rememberInfiniteTransition(label = "capri-hero")
     val phase by transition.animateFloat(
         initialValue = 0f,
@@ -156,21 +163,19 @@ private fun CapriHero(settings: Settings, onClearFinished: () -> Unit) {
         animationSpec = infiniteRepeatable(tween(9000, easing = LinearEasing), RepeatMode.Reverse),
         label = "phase"
     )
-    val gradient = Brush.linearGradient(
+    val textBrush = Brush.linearGradient(
         colors = listOf(
             lerp(CapriYellow, CapriCyan, phase),
             lerp(CapriMagenta, CapriYellow, phase),
             lerp(CapriCyan, CapriMagenta, phase)
         ),
         start = Offset.Zero,
-        end = Offset(900f, 120f)
+        end = Offset(520f, 40f)
     )
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp))
-            .background(gradient)
-            .padding(start = 16.dp, end = 6.dp, top = 10.dp, bottom = 10.dp),
+            .padding(start = 16.dp, end = 16.dp, top = 16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         CapriLogo(modifier = Modifier.size(26.dp))
@@ -178,30 +183,114 @@ private fun CapriHero(settings: Settings, onClearFinished: () -> Unit) {
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 "CAPRI",
-                color = CapriInk,
-                fontWeight = FontWeight.Black,
-                fontSize = 18.sp,
-                letterSpacing = 3.sp
+                style = TextStyle(brush = textBrush, fontWeight = FontWeight.Black),
+                fontSize = 20.sp,
+                letterSpacing = 3.sp,
+                maxLines = 1
             )
             Text(
                 "${settings.ncnnModel.label.substringBefore(" (")} · " +
                     if (settings.quality == AiQuality.HIGH) "ensemble" else "on-device",
-                color = Color(0xD9120F1E),
-                fontSize = 10.5.sp,
-                maxLines = 1,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 11.sp,
+                // Two lines: the model names are long and used to end in "…" on a narrow phone.
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis
-            )
-        }
-        IconButton(onClick = onClearFinished, modifier = Modifier.size(38.dp)) {
-            Icon(
-                Icons.Filled.DeleteSweep,
-                contentDescription = "Clear finished jobs",
-                modifier = Modifier.size(18.dp),
-                tint = CapriInk
             )
         }
     }
 }
+
+/**
+ * The luminous bar under the wordmark: the same band as before, empty, so the colour reads as a
+ * signature instead of a banner.
+ */
+@Composable
+private fun LuminousBar() {
+    val transition = rememberInfiniteTransition(label = "capri-bar")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(9000, easing = LinearEasing), RepeatMode.Reverse),
+        label = "phase"
+    )
+    val colors = listOf(
+        lerp(CapriYellow, CapriCyan, phase),
+        lerp(CapriMagenta, CapriYellow, phase),
+        lerp(CapriCyan, CapriMagenta, phase)
+    )
+    val start = Offset.Zero
+    val end = Offset(900f, 40f)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .padding(top = 12.dp)
+            .height(40.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        // Halo: the same colours at low alpha, taller, so the bar glows instead of sitting flat.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(40.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(Brush.linearGradient(colors.map { it.copy(alpha = 0.16f) }, start, end))
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(12.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(Brush.linearGradient(colors, start, end))
+        )
+    }
+}
+
+/** A quiet field of stars behind everything: the OLED black needs something to breathe. */
+@Composable
+private fun StarField(modifier: Modifier = Modifier) {
+    val stars = remember {
+        val random = java.util.Random(7919L)
+        List(72) {
+            Star(
+                x = random.nextFloat(),
+                y = random.nextFloat(),
+                radius = 0.7f + random.nextFloat() * 1.5f,
+                alpha = 0.18f + random.nextFloat() * 0.55f,
+                speed = 0.35f + random.nextFloat() * 1.1f,
+                phase = random.nextFloat()
+            )
+        }
+    }
+    val transition = rememberInfiniteTransition(label = "stars")
+    val time by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(16000, easing = LinearEasing), RepeatMode.Restart),
+        label = "time"
+    )
+    Canvas(modifier = modifier.fillMaxSize()) {
+        stars.forEach { star ->
+            val twinkle = 0.55f + 0.45f * kotlin.math.sin((time * star.speed + star.phase) * 6.2831853f)
+            drawCircle(
+                color = Color.White.copy(alpha = (star.alpha * twinkle).coerceIn(0f, 1f)),
+                radius = star.radius * density,
+                center = Offset(star.x * size.width, star.y * size.height)
+            )
+        }
+    }
+}
+
+/** One star of the field: position in 0..1, radius in dp, twinkle speed and phase. */
+private class Star(
+    val x: Float,
+    val y: Float,
+    val radius: Float,
+    val alpha: Float,
+    val speed: Float,
+    val phase: Float
+)
 
 /**
  * Bar two, in Material You: what the engine will do, and whether the GPU is already prepared.
@@ -214,10 +303,10 @@ private fun EngineBar(settings: Settings, warmup: EngineWarmup.Status) {
             .padding(horizontal = 16.dp)
             .padding(top = 10.dp)
             .clip(RoundedCornerShape(20.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            .background(Color.Black)
             .border(
                 width = 1.dp,
-                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
                 shape = RoundedCornerShape(20.dp)
             )
             .padding(horizontal = 14.dp, vertical = 10.dp)
@@ -227,7 +316,9 @@ private fun EngineBar(settings: Settings, warmup: EngineWarmup.Status) {
             color = MaterialTheme.colorScheme.onSurface,
             fontSize = 11.5.sp,
             fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
+            // The full summary (model, resolution, rate, workers, codec) used to be clipped to one
+            // line on a phone and lost its tail: it wraps now.
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
         Spacer(Modifier.height(5.dp))
@@ -281,7 +372,7 @@ private fun WarmupLine(status: EngineWarmup.Status) {
             label,
             color = neutral,
             fontSize = 10.5.sp,
-            maxLines = 1,
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
     }
@@ -296,7 +387,7 @@ private fun CapriLogo(modifier: Modifier = Modifier) {
         val inset = strokeWidth * 1.1f
         val box = Size(size.width - inset * 2, size.height - inset * 2)
         drawArc(
-            color = CapriInk,
+            color = CapriCyan,
             startAngle = 40f,
             sweepAngle = 280f,
             useCenter = false,
@@ -310,7 +401,7 @@ private fun CapriLogo(modifier: Modifier = Modifier) {
             lineTo(size.width * 0.42f, size.height * 0.66f)
             close()
         }
-        drawPath(path, color = CapriInk)
+        drawPath(path, color = CapriCyan)
     }
 }
 
@@ -361,7 +452,7 @@ private fun JobCard(job: JobItem, canRemove: Boolean, onRemove: () -> Unit, modi
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(26.dp))
-            .background(MaterialTheme.colorScheme.surface)
+            .background(Color.Black)
             .border(
                 width = 1.dp,
                 brush = if (running) {
@@ -430,7 +521,7 @@ private fun JobCard(job: JobItem, canRemove: Boolean, onRemove: () -> Unit, modi
                         metaLine(job),
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
@@ -682,6 +773,8 @@ private fun SystemStrip(running: Boolean, advanced: Boolean) {
                 "Battery ${t(s.batteryC)}",
                 fontSize = 11.sp,
                 fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                softWrap = false,
                 color = when {
                     s.batteryC == null -> neutral
                     s.batteryC >= 48 -> CapriDanger
@@ -701,7 +794,7 @@ private fun SystemStrip(running: Boolean, advanced: Boolean) {
                 },
                 fontSize = 10.5.sp,
                 color = neutral,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
         }
@@ -738,7 +831,7 @@ private fun LogPanel(logs: List<String>, onCopy: () -> Unit, onShare: () -> Unit
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(max = 200.dp)
-                    .background(Color(0xFF08070F))
+                    .background(Color.Black)
             ) {
                 if (logs.isEmpty()) {
                     Text(
