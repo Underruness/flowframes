@@ -1,15 +1,12 @@
 package com.flowframes.android.ui
 
 import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -53,28 +50,6 @@ private val CapriDark = darkColorScheme(
     onError = Color(0xFF33060E)
 )
 
-private val CapriLight = lightColorScheme(
-    primary = Color(0xFF6A5C00),
-    onPrimary = Color(0xFFFFFFFF),
-    primaryContainer = Color(0xFFFFF2A8),
-    onPrimaryContainer = Color(0xFF211C00),
-    secondary = Color(0xFF00677A),
-    onSecondary = Color(0xFFFFFFFF),
-    secondaryContainer = Color(0xFFB6EBF7),
-    onSecondaryContainer = Color(0xFF001F27),
-    tertiary = Color(0xFFA1205E),
-    onTertiary = Color(0xFFFFFFFF),
-    background = Color(0xFFFCF8FF),
-    onBackground = Color(0xFF1B1725),
-    surface = Color(0xFFFCF8FF),
-    onSurface = Color(0xFF1B1725),
-    surfaceVariant = Color(0xFFE6E0F0),
-    onSurfaceVariant = Color(0xFF47415A),
-    outline = Color(0xFF78718E),
-    error = Color(0xFFB3261E),
-    onError = Color(0xFFFFFFFF)
-)
-
 /** Soft, generous corners: the Material You look. */
 private val CapriShapes = Shapes(
     extraSmall = RoundedCornerShape(10.dp),
@@ -94,18 +69,30 @@ private val CapriTypography = Typography().let { base ->
 }
 
 /**
- * Material You when the phone has it: on Android 12+ the palette comes from the wallpaper
- * (dynamic colour), and Capri's own yellow / cyan / magenta take over before that.
+ * Material You accents on OLED black.
+ *
+ * The wallpaper still decides the primary / secondary / tertiary colours on Android 12+, but the
+ * neutrals are pinned: background, surfaces and every compartment are pure black, so the phone's
+ * OLED panel draws nothing where there is nothing, and the accents carry the colour. The app is
+ * dark whatever the system setting says; a light palette on black would be unreadable.
  */
 @Composable
 fun CapriTheme(content: @Composable () -> Unit) {
-    val dark = isSystemInDarkTheme()
-    val scheme = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        val context = LocalContext.current
-        if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+    val base = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        dynamicDarkColorScheme(LocalContext.current)
     } else {
-        if (dark) CapriDark else CapriLight
+        CapriDark
     }
+    val scheme = base.copy(
+        background = Color.Black,
+        onBackground = Color(0xFFF4F1FF),
+        surface = Color.Black,
+        onSurface = Color(0xFFF4F1FF),
+        surfaceVariant = Color(0xFF0B0B0B),
+        onSurfaceVariant = Color(0xFFB9B3C9),
+        outline = Color(0xFF3A3346),
+        outlineVariant = Color(0xFF232030)
+    )
     MaterialTheme(
         colorScheme = scheme,
         shapes = CapriShapes,
