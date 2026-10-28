@@ -110,6 +110,13 @@ jobs:
             interpolation démarre immédiatement. Les inférences parallèles se règlent avec un curseur
             (2 par défaut).
 
+            Nouveau en 1.7.3 : Capri passe en noir OLED — fond, cartes, barres et panneau de log sont
+            noirs, un champ d'étoiles discret anime l'arrière-plan, le dégradé ne reste que dans les
+            lettres de CAPRI et dans une barre lumineuse vide placée dessous. La poubelle à côté du
+            titre disparaît, et les textes longs (résumé du moteur, modèle, métadonnées, ligne système)
+            ne se coupent plus. Le décodage est aussi 20 à 50 % plus rapide selon que la source est
+            déjà à la résolution cible ou doit être redimensionnée.
+
             Nouveau en 1.7.2 : le menu principal est découpé en trois bandes — le dégradé ne couvre
             plus que le logo et le mot CAPRI, les réglages du moteur passent dans une barre Material You,
             et la lecture système n'affiche plus que la RAM et la température de la batterie (CPU, GPU,
