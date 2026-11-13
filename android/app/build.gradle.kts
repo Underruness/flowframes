@@ -20,8 +20,8 @@ android {
         applicationId = "com.flowframes.android.capri"
         minSdk = 26
         targetSdk = 34
-        versionCode = 23
-        versionName = "1.8.2"
+        versionCode = 24
+        versionName = "1.8.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Ship 64-bit ARM by default (every Android phone since ~2016).

@@ -90,10 +90,11 @@ jobs:
             FlowFrames disparaît — Capri est désormais l'application, avec son identifiant
             `com.flowframes.android.capri`, donc la mise à jour se fait par-dessus la 1.7.x.
 
-            Nouveau en 1.8.2 : le **benchmark intégré mesure le NPU**. Une ligne `ONNX Runtime QNN
-            (NPU)` s'ajoute à côté de la référence CPU, sur la même image et le même fichier `.onnx`,
-            ce qui donne les ms/frame du Hexagon et l'effet du découpage du graphe. Le NPU n'est donc
-            plus seulement le repli du moteur ONNX : il se mesure.
+            Nouveau en 1.8.3 : le **benchmark intégré mesure le NPU**, sur la même image et le même
+            fichier `.onnx` que la référence CPU, avec **une seule session** (le HTP n'exécute qu'un
+            graphe à la fois) et 300 s de budget, parce que le premier run compile le graphe pour le
+            DSP. La ligne `ONNX Runtime QNN (NPU) 1 × 4T` donne les ms/frame du Hexagon et l'effet du
+            découpage : ce que le HTP ne sait pas exécuter (`GridSample`) reste sur le CPU.
 
             Nouveau en 1.8.1 : l'onglet **Create** et le moteur de génération d'images sont retirés.
             Capri redevient une application d'interpolation seule, sans les dépendances natives de la

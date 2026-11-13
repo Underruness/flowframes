@@ -58,6 +58,8 @@ object EngineBenchmark {
         val parallel: Boolean = false,
         /** ONNX Runtime on the Hexagon NPU through QNN instead of its CPU kernels. */
         val qnn: Boolean = false,
+        /** Give-up time for this configuration (the NPU compiles its graph on the first run). */
+        val timeoutS: Long = CONFIG_TIMEOUT_S,
         val rounds: Int = 3
     )
 
@@ -166,9 +168,12 @@ object EngineBenchmark {
         // The NPU: same ONNX file, QNN/HTP provider. Measured next to the CPU reference so the
         // partition ONNX Runtime makes (GridSample stays on the CPU) shows in the number.
         if (EngineFactory.qnnWanted()) {
+            // ONE session: the HTP runs one graph at a time, so a second session only doubles the
+            // memory and the compile time. 300 s because the first run compiles the graph for the
+            // DSP (libQnnHtpPrepare), which takes minutes on a 2 MPx RIFE graph.
             configs += Config(
-                "ONNX Runtime QNN (NPU) $autoWorkers × ${perWorker}T",
-                EngineKind.ORT_CPU, autoWorkers, perWorker, qnn = true
+                "ONNX Runtime QNN (NPU) 1 × 4T",
+                EngineKind.ORT_CPU, 1, 4, qnn = true, timeoutS = 300L, rounds = 2
             )
         }
         if (gpus > 0) {
@@ -218,7 +223,7 @@ object EngineBenchmark {
                 continue
             }
             val tag = "[${index + 1}/${configs.size}] ${cfg.label}"
-            val limit = if (cfg.fp16 && cfg.coop) COOP_TIMEOUT_S else CONFIG_TIMEOUT_S
+            val limit = if (cfg.fp16 && cfg.coop) COOP_TIMEOUT_S else cfg.timeoutS
             report("$tag …")
             val progress = Progress()
             val result = runCatching {
