@@ -46,38 +46,6 @@ target_link_options(flowframes_rife PRIVATE -Wl,--gc-sections -Wl,--exclude-libs
 target_link_libraries(flowframes_rife ncnn android log)
 
 # ---------------------------------------------------------------------------------------------
-# Diffusion: stable-diffusion.cpp pinned to a tag, fetched at configure time (same idea as the
-# ncnn prebuilt above: no third-party source in the repository). CPU backend only for now.
+# Diffusion was removed with 1.8.1: Capri interpolates, it does not generate. The native build
+# is the RIFE engine only again, which is also ~38 MB less per APK.
 # ---------------------------------------------------------------------------------------------
-include(FetchContent)
-
-set(SD_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(SD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(SD_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-set(SD_WEBP OFF CACHE BOOL "" FORCE)
-set(SD_WEBM OFF CACHE BOOL "" FORCE)
-set(SD_VULKAN OFF CACHE BOOL "" FORCE)
-set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
-set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)
-# ggml targets phone cores: keep the dot-product / i8mm / fp16 kernels it detects at compile time.
-set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
-set(GGML_CPU_ARM_ARCH "" CACHE STRING "" FORCE)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-
-FetchContent_Declare(
-    sdcpp
-    GIT_REPOSITORY https://github.com/leejet/stable-diffusion.cpp.git
-    GIT_TAG        master-1024-77b72a2
-    GIT_SHALLOW    TRUE
-    GIT_SUBMODULES ggml
-    GIT_PROGRESS   TRUE)
-FetchContent_MakeAvailable(sdcpp)
-
-add_library(capri_diffusion SHARED diffusion_jni.cpp)
-target_include_directories(capri_diffusion PRIVATE ${sdcpp_SOURCE_DIR}/include)
-target_compile_options(capri_diffusion PRIVATE -O3)
-target_link_options(capri_diffusion PRIVATE
-    -Wl,--gc-sections
-    -Wl,--exclude-libs,ALL
-    -Wl,-z,max-page-size=16384)
-target_link_libraries(capri_diffusion stable-diffusion android log)

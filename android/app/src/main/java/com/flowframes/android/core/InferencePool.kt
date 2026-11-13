@@ -49,6 +49,7 @@ class InferencePool(
         threadsPerWorker: Int,
         useNnapi: Boolean = false,
         useXnnpack: Boolean = false,
+        useQnn: Boolean = false,
         parallelOps: Boolean = false,
         frameWidth: Int = 0,
         frameHeight: Int = 0,
@@ -56,7 +57,7 @@ class InferencePool(
         log: (String) -> Unit = {}
     ) : this(
         createOrtSessions(
-            modelPath, workers, threadsPerWorker, useNnapi, useXnnpack, parallelOps,
+            modelPath, workers, threadsPerWorker, useNnapi, useXnnpack, useQnn, parallelOps,
             frameWidth, frameHeight, profileDir, log
         ),
         workers, threadsPerWorker, log
@@ -212,6 +213,7 @@ class InferencePool(
             threadsPerWorker: Int,
             useNnapi: Boolean,
             useXnnpack: Boolean,
+            useQnn: Boolean,
             parallelOps: Boolean,
             frameWidth: Int,
             frameHeight: Int,
@@ -228,6 +230,7 @@ class InferencePool(
                         intraOpThreads = threadsPerWorker,
                         useNnapi = useNnapi,
                         useXnnpack = useXnnpack,
+                        useQnn = useQnn,
                         parallelOps = parallelOps,
                         frameWidth = frameWidth,
                         frameHeight = frameHeight,

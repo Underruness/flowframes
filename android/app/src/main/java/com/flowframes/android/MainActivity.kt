@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
@@ -50,8 +49,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.flowframes.android.core.RifeEngine
-import com.flowframes.android.gen.GenerationStore
-import com.flowframes.android.gen.NativeDiffusion
 import com.flowframes.android.job.AppGraph
 import com.flowframes.android.job.EngineBenchmark
 import com.flowframes.android.job.EngineKind
@@ -59,7 +56,6 @@ import com.flowframes.android.job.EngineWarmup
 import com.flowframes.android.job.InterpolationService
 import com.flowframes.android.job.JobItem
 import com.flowframes.android.job.Settings
-import com.flowframes.android.ui.CapriCreate
 import com.flowframes.android.ui.CapriInk
 import com.flowframes.android.ui.CapriSettingsScreen
 import com.flowframes.android.ui.CapriStudio
@@ -76,7 +72,7 @@ import java.util.UUID
  */
 class MainActivity : ComponentActivity() {
 
-    private enum class Tab { STUDIO, CREATE, SETTINGS }
+    private enum class Tab { STUDIO, SETTINGS }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -99,51 +95,6 @@ class MainActivity : ComponentActivity() {
         val warmup by EngineWarmup.status.collectAsState()
         val scope = rememberCoroutineScope()
         var tab by remember { mutableStateOf(Tab.STUDIO) }
-
-        // Local generation: one engine, kept loaded between runs, released with the screen.
-        val genStore = remember { GenerationStore(applicationContext) { line -> AppGraph.jobs.addLog(line) } }
-        val genState by genStore.state.collectAsState()
-        var importProgress by remember { mutableStateOf<Pair<Long, Long>?>(null) }
-        DisposableEffect(Unit) { onDispose { genStore.close() } }
-
-        val modelLauncher = rememberLauncherForActivityResult(
-            ActivityResultContracts.OpenDocument()
-        ) { uri ->
-            if (uri != null) {
-                scope.launch {
-                    importProgress = 0L to -1L
-                    withContext(Dispatchers.IO) {
-                        genStore.importModel(uri) { copied, total -> importProgress = copied to total }
-                    }
-                    importProgress = null
-                }
-            }
-        }
-
-        val saveImage: () -> Unit = {
-            scope.launch {
-                val saved = withContext(Dispatchers.IO) { genStore.save() }
-                if (saved != null) {
-                    AppGraph.jobs.addLog("Image saved: Download/capri/${saved.name}")
-                }
-            }
-        }
-
-        val shareImage: () -> Unit = {
-            scope.launch {
-                val saved = withContext(Dispatchers.IO) { genStore.save() } ?: return@launch
-                val uri = saved.uri ?: run {
-                    AppGraph.jobs.addLog("This Android version keeps the picture in the app folder: use Save first")
-                    return@launch
-                }
-                val send = Intent(Intent.ACTION_SEND).apply {
-                    type = "image/png"
-                    putExtra(Intent.EXTRA_STREAM, uri)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-                runCatching { startActivity(Intent.createChooser(send, "Share picture")) }
-            }
-        }
 
         val copyLogs: () -> Unit = {
             val text = AppGraph.jobs.logText()
@@ -254,19 +205,6 @@ class MainActivity : ComponentActivity() {
                         )
                     )
                     NavigationBarItem(
-                        selected = tab == Tab.CREATE,
-                        onClick = { tab = Tab.CREATE },
-                        icon = { Icon(Icons.Filled.AutoAwesome, contentDescription = null) },
-                        label = { Text("Create", fontSize = 11.sp) },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = CapriInk,
-                            selectedTextColor = MaterialTheme.colorScheme.primary,
-                            indicatorColor = MaterialTheme.colorScheme.primary,
-                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    )
-                    NavigationBarItem(
                         selected = tab == Tab.SETTINGS,
                         onClick = { tab = Tab.SETTINGS },
                         icon = { Icon(Icons.Filled.Tune, contentDescription = null) },
@@ -303,28 +241,6 @@ class MainActivity : ComponentActivity() {
                         onCopyLogs = copyLogs,
                         onShareLogs = shareLogs,
                         onRemove = { id -> AppGraph.jobs.remove(id) }
-                    )
-
-                    Tab.CREATE -> CapriCreate(
-                        state = genState,
-                        engineAvailable = NativeDiffusion.available,
-                        engineReason = NativeDiffusion.unavailableReason,
-                        importProgress = importProgress,
-                        onPrompt = { text -> genStore.update { it.copy(prompt = text) } },
-                        onNegative = { text -> genStore.update { it.copy(negative = text) } },
-                        onSize = { size -> genStore.update { it.copy(size = size) } },
-                        onSteps = { steps -> genStore.update { it.copy(steps = steps) } },
-                        onCfg = { cfg -> genStore.update { it.copy(cfg = cfg) } },
-                        onSeed = { text -> genStore.update { it.copy(seedText = text.filter { c -> c.isDigit() }.take(19)) } },
-                        onSampler = { sampler -> genStore.update { it.copy(sampler = sampler) } },
-                        onGenerate = { genStore.start(scope) },
-                        onCancel = { genStore.cancel() },
-                        onImport = { modelLauncher.launch(arrayOf("*/*")) },
-                        onSelectModel = { model -> genStore.selectModel(model) },
-                        onDeleteModel = { model -> genStore.deleteModel(model) },
-                        onSave = { saveImage() },
-                        onShare = { shareImage() },
-                        onUseSeed = { genStore.update { it.copy(seedText = it.resultSeed?.toString() ?: "") } }
                     )
 
                     Tab.SETTINGS -> CapriSettingsScreen(

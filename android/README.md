@@ -1,7 +1,7 @@
 # Capri Android
 
-Application Android tout-en-un, 100 % sur l'appareil : interpolation de vidéo par IA (RIFE) et
-génération d'images par diffusion locale. Héritière du portage Android de
+Application Android tout-en-un, 100 % sur l'appareil : interpolation de vidéo par IA (RIFE).
+Héritière du portage Android de
 **[FlowFrames](https://github.com/n00mkrad/flowframes)**, dont elle garde le moteur d'interpolation
 et le pipeline, sans PC et sans internet.
 
@@ -33,8 +33,7 @@ x86_64 ou un appareil 32 bits, voir « Compiler soi-même ».
 
 ## Utilisation
 
-L'application a trois onglets : **Studio** (interpolation), **Create** (génération d'images) et
-**Settings**.
+L'application a deux onglets : **Studio** (interpolation) et **Settings**.
 
 1. **Ajouter** une ou plusieurs vidéos (sélecteur système, aucun accès complet au stockage requis).
 2. Régler le facteur (`x2`, `x3`, `x4`, `x6`, `x8`) et éventuellement la résolution de traitement.
@@ -128,31 +127,10 @@ echo "sdk.dir=/chemin/vers/android-sdk" > local.properties
 
 Sortie : `app/build/outputs/apk/release/app-release.apk` (`com.flowframes.android.capri`).
 
-L'interpolation est compilée dans `libflowframes_rife.so` (ncnn + Vulkan) et la génération d'images
-dans `libcapri_diffusion.so`. CMake récupère la version épinglée de
-[stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) au premier configure et la
-compile pour l'ABI visée : le premier build est plus long, les suivants reprennent sur le cache de
-Gradle (`app/.cxx`). Le NDK 30.0.16248370 et CMake 3.22.1 sont nécessaires.
-
-## Génération d'images (diffusion locale)
-
-L'onglet **Create** rend des images avec [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)
-(ggml, CPU), sans réseau.
-
-1. **Importer un modèle** : un checkpoint `.safetensors`, `.ckpt` ou `.gguf` (SD 1.5, SDXL,
-   SD-Turbo, LCM…) choisi dans le sélecteur système. Il est copié dans le dossier privé de
-   l'application (`files/models`), donc il continue de fonctionner après expiration de l'accès au
-   fichier d'origine. Aucun modèle n'est fourni ni téléchargé par l'application.
-2. Régler le prompt, le prompt négatif, la taille (512², 512×768, 768×512, 768²), les étapes, le
-   CFG, le sampler et la graine (`random` par défaut).
-3. **Generate** : la progression s'affiche pas à pas ; **Save** écrit un PNG dans `Download/capri`,
-   **Share** l'envoie à une autre application.
-
-Le modèle reste chargé entre deux générations (le chargement prend des dizaines de secondes) et
-est libéré quand on en change ou quand l'écran Create est fermé. Sur un téléphone, un fine-tune
-Turbo/LCM en 4 à 8 étapes reste le plus rapide ; un SD 1.5 fp16 en 20 étapes prend plusieurs
-minutes. Les modèles SDXL et les très gros GGUF demandent beaucoup de RAM : commencer bas en
-résolution et en étapes.
+L'interpolation est compilée dans `libflowframes_rife.so` (ncnn + Vulkan). CMake récupère le
+binaire ncnn épinglé au premier configure et le compile pour l'ABI visée : le premier build est plus
+long, les suivants reprennent sur le cache de Gradle (`app/.cxx`). Le NDK 30.0.16248370 et CMake
+3.22.1 sont nécessaires.
 
 ### Tests
 

@@ -244,11 +244,25 @@ object EngineFactory {
             threadsPerWorker = choice.threadsPerWorker,
             useNnapi = settings.useNnapi,
             useXnnpack = settings.useXnnpack,
+            useQnn = qnnWanted(),
             parallelOps = settings.parallelOps,
             frameWidth = width,
             frameHeight = height,
             log = log
         )
+    }
+
+    /**
+     * The Hexagon NPU is Qualcomm's: the QNN HTP backend only exists on Snapdragon. Asking for it
+     * elsewhere makes `addQnn` throw, which the engine already catches and logs.
+     */
+    fun qnnWanted(): Boolean {
+        val manufacturer =
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                android.os.Build.SOC_MANUFACTURER
+            } else ""
+        val hardware = android.os.Build.HARDWARE
+        return manufacturer.contains("Qualcomm", ignoreCase = true) || hardware.contains("qcom", ignoreCase = true)
     }
 
     /**

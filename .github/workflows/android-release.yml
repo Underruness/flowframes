@@ -42,8 +42,8 @@ jobs:
             echo "No release key secret: the APK is signed with the debug key"
           fi
       - name: Build the release APK (Capri)
-        # CMake fetches stable-diffusion.cpp (pinned tag) on the first configure and compiles it for
-        # arm64: the first CI run of a commit pays a few extra minutes for the diffusion engine.
+        # CMake downloads the pinned ncnn prebuilt on the first configure and compiles the RIFE
+        # engine for arm64; image generation was dropped in 1.8.1, so nothing else is fetched.
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon assembleRelease
@@ -90,18 +90,22 @@ jobs:
             FlowFrames disparaît — Capri est désormais l'application, avec son identifiant
             `com.flowframes.android.capri`, donc la mise à jour se fait par-dessus la 1.7.x.
 
-            Nouveau en 1.8.0 : un onglet **Create** pour la génération d'images sur l'appareil.
-            Les modèles ne sont pas dans l'APK : on importe un checkpoint (.safetensors, .ckpt ou
-            .gguf — SD 1.5, SDXL, SD-Turbo, LCM) depuis le stockage du téléphone, il est copié dans
-            le dossier privé de l'application, puis le moteur stable-diffusion.cpp (ggml, CPU) rend
-            l'image en local, sans réseau. Prompt, prompt négatif, taille, étapes, CFG, sampler et
-            graine sont réglables, la progression s'affiche pas à pas, et le PNG part dans
-            Download/capri (MediaStore, sans permission de stockage). L'onglet Studio garde
-            l'interpolation RIFE et l'onglet Settings ses réglages.
+            Nouveau en 1.8.1 : l'onglet **Create** et le moteur de génération d'images sont retirés.
+            Capri redevient une application d'interpolation seule, sans les dépendances natives de la
+            diffusion.
 
-            Le build natif récupère stable-diffusion.cpp à une version épinglée (tag
-            `master-1024-77b72a2`) et le compile pour arm64 avec le NDK : la première compilation
-            est plus longue, les suivantes sont mises en cache par Gradle.
+            Nouveau aussi : le **NPU Hexagon**. ONNX Runtime est désormais bâti avec l'execution
+            provider QNN et le runtime Hexagon est embarqué (HTP v68 à v81), donc le modèle RIFE
+            peut tourner sur le NPU Snapdragon avec le **même fichier .onnx**, sans conversion et
+            sans SDK Qualcomm à la compilation. Les opérateurs que le HTP ne sait pas exécuter (le
+            warping `GridSample` notamment) restent sur le CPU dans la même session : ONNX Runtime
+            découpe le graphe.
+
+            Pour tester : **Settings → Engine → ONNX Runtime**, puis lancer une interpolation. Le
+            journal indique `ORT: QNN enabled (Hexagon NPU, HTP fp16)` et le nombre de sessions ; le
+            self-test PSNR de démarrage rejette le moteur si le NPU renvoie une image fausse, et le
+            job retombe alors sur le GPU/CPU. Coût : l'APK grossit (le runtime Hexagon et son
+            compilateur de graphe pèsent une centaine de mégaoctets).
 
             Signature v1 + v2 + v3 avec la clé de release Capri/FlowFrames : inutile de re-signer.
             Désinstaller une fois l'ancienne version si Android refuse l'installation (clé

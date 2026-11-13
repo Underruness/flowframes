@@ -26,6 +26,8 @@ class RifeEngine(
     intraOpThreads: Int = 4,
     useNnapi: Boolean = false,
     useXnnpack: Boolean = false,
+    /** Hexagon NPU through the QNN execution provider (Snapdragon only). */
+    useQnn: Boolean = false,
     /** Run independent branches of the graph concurrently instead of one operator at a time. */
     parallelOps: Boolean = false,
     frameWidth: Int = 0,
@@ -78,10 +80,7 @@ class RifeEngine(
             }
         }
         staticShapes = static
-        providers = buildString {
-            if (useNnapi) append("NNAPI,")
-            append(if (useXnnpack) "XNNPACK" else "CPU")
-        }
+        var qnnActive = false
 
         if (useNnapi) {
             runCatching { opts.addNnapi() }
@@ -92,6 +91,27 @@ class RifeEngine(
             runCatching { opts.addXnnpack(emptyMap()) }
                 .onSuccess { log("ORT: XNNPACK enabled") }
                 .onFailure { log("ORT: XNNPACK unavailable (${it.message})") }
+        }
+        if (useQnn) {
+            // The QNN runtime libraries (libQnnHtp + the Hexagon stubs/skels) ship in the
+            // onnxruntime-android-qnn AAR, so the backend is named by its soname alone. Ops HTP
+            // cannot run stay on the CPU inside the same session: ORT partitions the graph.
+            val qnnOptions = mapOf(
+                "backend_path" to "libQnnHtp.so",
+                "htp_performance_mode" to "burst",
+                "enable_htp_fp16_precision" to "1"
+            )
+            runCatching { opts.addQnn(qnnOptions) }
+                .onSuccess {
+                    qnnActive = true
+                    log("ORT: QNN enabled (Hexagon NPU, HTP fp16)")
+                }
+                .onFailure { log("ORT: QNN unavailable (${it.message}), CPU backend") }
+        }
+        providers = buildString {
+            if (useNnapi) append("NNAPI,")
+            if (qnnActive) append("QNN,")
+            append(if (useXnnpack) "XNNPACK" else "CPU")
         }
         profileFile = profileDir?.let { dir ->
             runCatching {

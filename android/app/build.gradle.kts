@@ -20,8 +20,8 @@ android {
         applicationId = "com.flowframes.android.capri"
         minSdk = 26
         targetSdk = 34
-        versionCode = 21
-        versionName = "1.8.0"
+        versionCode = 22
+        versionName = "1.8.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Ship 64-bit ARM by default (every Android phone since ~2016).
@@ -66,8 +66,8 @@ android {
         }
     }
 
-    // Native engines: RIFE interpolation (ncnn + Vulkan) and local diffusion (stable-diffusion.cpp).
-    // CMake downloads the ncnn prebuilt and the diffusion sources on the first build.
+    // Native engine: RIFE interpolation (ncnn + Vulkan). CMake downloads the ncnn prebuilt on the
+    // first build. Image generation was dropped in 1.8.1: Capri interpolates and nothing else.
     ndkVersion = "30.0.16248370"
     externalNativeBuild {
         cmake {
@@ -126,6 +126,7 @@ android {
 // A plain JVM build of the same version is added for tests instead.
 configurations.matching { it.name.startsWith("test") }.configureEach {
     exclude(group = "com.microsoft.onnxruntime", module = "onnxruntime-android")
+    exclude(group = "com.microsoft.onnxruntime", module = "onnxruntime-android-qnn")
 }
 
 dependencies {
@@ -145,10 +146,12 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
+    // The -qnn AAR ships the QNN execution provider and the Hexagon runtime: the RIFE model can run
+    // on the NPU (HTP) with the same ONNX file, no conversion and no Qualcomm SDK on the build host.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android-qnn:1.29.0")
 
     testImplementation("junit:junit:4.13.2")
-    testImplementation("com.microsoft.onnxruntime:onnxruntime:1.19.2")
+    testImplementation("com.microsoft.onnxruntime:onnxruntime:1.29.0")
 
     androidTestImplementation(composeBom)
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
