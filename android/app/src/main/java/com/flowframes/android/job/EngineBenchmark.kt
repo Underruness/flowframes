@@ -56,6 +56,8 @@ object EngineBenchmark {
         val cpuThreads: Int = 0,
         val xnnpack: Boolean = false,
         val parallel: Boolean = false,
+        /** ONNX Runtime on the Hexagon NPU through QNN instead of its CPU kernels. */
+        val qnn: Boolean = false,
         val rounds: Int = 3
     )
 
@@ -161,6 +163,14 @@ object EngineBenchmark {
         val configs = ArrayList<Config>()
         // Reference first: its output is what every other configuration is compared with.
         configs += Config("ONNX Runtime $autoWorkers × ${perWorker}T", EngineKind.ORT_CPU, autoWorkers, perWorker)
+        // The NPU: same ONNX file, QNN/HTP provider. Measured next to the CPU reference so the
+        // partition ONNX Runtime makes (GridSample stays on the CPU) shows in the number.
+        if (EngineFactory.qnnWanted()) {
+            configs += Config(
+                "ONNX Runtime QNN (NPU) $autoWorkers × ${perWorker}T",
+                EngineKind.ORT_CPU, autoWorkers, perWorker, qnn = true
+            )
+        }
         if (gpus > 0) {
             configs += Config("GPU 4.9 ×1", EngineKind.NCNN_GPU, 1, 0)
             configs += Config("GPU 4.9 ×2", EngineKind.NCNN_GPU, 2, 0, rounds = 4)
@@ -383,7 +393,7 @@ object EngineBenchmark {
                 cfg.kind, cfg.workers, cfg.threadsPerWorker.coerceAtLeast(1),
                 cpuWorkers = cfg.cpuWorkers, cpuThreads = cfg.cpuThreads
             ),
-            width, height, log = {}
+            width, height, log = {}, useQnn = cfg.qnn
         )
 
     /** 8-bit ARGB, like the job's frames (the benchmark measures the path the job uses). */

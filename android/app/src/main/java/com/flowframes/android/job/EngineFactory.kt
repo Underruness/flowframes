@@ -222,7 +222,9 @@ object EngineFactory {
         choice: Choice,
         width: Int,
         height: Int,
-        log: (String) -> Unit
+        log: (String) -> Unit,
+        /** QNN/HTP on Snapdragon by default; the benchmark forces it per configuration. */
+        useQnn: Boolean = qnnWanted()
     ): InferencePool = when (choice.kind) {
         EngineKind.NCNN_GPU, EngineKind.AUTO -> {
             val engines = buildGpuEngines(context, settings, choice, log)
@@ -244,7 +246,7 @@ object EngineFactory {
             threadsPerWorker = choice.threadsPerWorker,
             useNnapi = settings.useNnapi,
             useXnnpack = settings.useXnnpack,
-            useQnn = qnnWanted(),
+            useQnn = useQnn,
             parallelOps = settings.parallelOps,
             frameWidth = width,
             frameHeight = height,
