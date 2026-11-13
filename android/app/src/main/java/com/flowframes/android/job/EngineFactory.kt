@@ -240,8 +240,10 @@ object EngineFactory {
             )
             InferencePool(listOf<FrameEngine>(engine), choice.workers, choice.threadsPerWorker, log)
         }
+        // The NPU loads the GridSample-free export: the stock graph gives the HTP nothing to claim.
         EngineKind.ORT_CPU -> InferencePool(
-            modelPath = ModelStore.prepare(context, settings.quality, log),
+            modelPath = if (useQnn) ModelStore.prepareQnn(context, log)
+            else ModelStore.prepare(context, settings.quality, log),
             workers = choice.workers,
             threadsPerWorker = choice.threadsPerWorker,
             useNnapi = settings.useNnapi,

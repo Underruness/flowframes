@@ -165,14 +165,15 @@ object EngineBenchmark {
         val configs = ArrayList<Config>()
         // Reference first: its output is what every other configuration is compared with.
         configs += Config("ONNX Runtime $autoWorkers × ${perWorker}T", EngineKind.ORT_CPU, autoWorkers, perWorker)
-        // The NPU: same ONNX file, QNN/HTP provider. Measured next to the CPU reference so the
-        // partition ONNX Runtime makes (GridSample stays on the CPU) shows in the number.
+        // The NPU: the GridSample-free export (see ModelStore.QNN_ASSET) through the QNN/HTP
+        // provider. The stock graph measured 1240 ms at 99.0 dB - identical output, slower than
+        // the CPU - because no node was claimed: the 14 warps all stayed on the CPU.
         if (EngineFactory.qnnWanted()) {
             // ONE session: the HTP runs one graph at a time, so a second session only doubles the
             // memory and the compile time. 300 s because the first run compiles the graph for the
             // DSP (libQnnHtpPrepare), which takes minutes on a 2 MPx RIFE graph.
             configs += Config(
-                "ONNX Runtime QNN (NPU) 1 × 4T",
+                "ONNX Runtime QNN (NPU) 1 × 4T · GatherElements export",
                 EngineKind.ORT_CPU, 1, 4, qnn = true, timeoutS = 300L, rounds = 2
             )
         }

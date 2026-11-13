@@ -90,6 +90,14 @@ jobs:
             FlowFrames disparaît — Capri est désormais l'application, avec son identifiant
             `com.flowframes.android.capri`, donc la mise à jour se fait par-dessus la 1.7.x.
 
+            Nouveau en 1.8.4 : le NPU reçoit un modèle qu'il peut réellement exécuter.
+            L'export standard laissait ses 14 `GridSample` sur le CPU — 1240 ms, plus lent que le CPU
+            pur, avec une sortie identique au bit près : le signe qu'aucun nœud n'était réclamé.
+            `tools/qnn_rewrite.py` remplace chaque warping par des indices entiers, quatre
+            `GatherElements` et les poids bilinéaires ; le graphe passe de 412 à 1784 nœuds et
+            l'écart mesuré contre l'original est de 1e-4 en fp32. La ligne `QNN (NPU) … GatherElements
+            export` du benchmark mesure cet export ; les autres lignes gardent le modèle d'origine.
+
             Nouveau en 1.8.3 : le **benchmark intégré mesure le NPU**, sur la même image et le même
             fichier `.onnx` que la référence CPU, avec **une seule session** (le HTP n'exécute qu'un
             graphe à la fois) et 300 s de budget, parce que le premier run compile le graphe pour le
