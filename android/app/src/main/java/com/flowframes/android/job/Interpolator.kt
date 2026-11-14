@@ -176,7 +176,7 @@ class Interpolator(
             val automatic = RifeEngine.defaultThreads()
             val totalThreads = if (settings.threads > 0) settings.threads else automatic
             // The NPU is a single device: extra sessions would only duplicate the compiled graph.
-            // The threads stay available for the CPU fallback nodes and the codecs.
+            // The threads stay available for the codecs; inference is strict QNN.
             val workers = if (qnnEnabled) 1 else {
                 (if (settings.workers > 0) settings.workers else InferencePool.defaultWorkers())
                     .coerceAtMost(totalThreads)
@@ -190,8 +190,8 @@ class Interpolator(
             )
             if (qnnEnabled) {
                 log(
-                    "QNN: HTP session requested (FP16) · one inference at a time · fixed ${targetW}x$targetH shapes · " +
-                        "the first session compiles the graph and can take a while"
+                    "QNN: strict HTP session requested (FP16, no CPU fallback) · one inference at a time · " +
+                        "fixed ${targetW}x$targetH shapes · the first session compiles the graph and can take a while"
                 )
             }
             if (settings.useNnapi && qnnEnabled) {

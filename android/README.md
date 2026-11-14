@@ -39,7 +39,7 @@ Le journal intégré affiche chaque étape (modèle, décodeur, images traitées
 | Fonction FlowFrames | Android | Remarque |
 |---|---|---|
 | Interpolation RIFE (NCNN/CUDA) | ✅ RIFE 4.9 via ONNX Runtime | XNNPACK (CPU), NNAPI, ou QNN HTP (NPU) |
-| Accélération NPU Qualcomm | ✅ build `-Pqnn=true` | QNN HTP (session), FP16, une session ; comparer au CPU |
+| Accélération NPU Qualcomm | ✅ build `-Pqnn=true` | QNN HTP strict, FP16, une session, profilage CSV ; aucun repli CPU |
 | Facteur 2x / 3x / 4x / 8x | ✅ 2 → 8, phases quelconques | modèle à timestep variable |
 | Qualité « ensemble » | ✅ réglage Rapide / Haute qualité | deux modèles embarqués |
 | Résolution maximale | ✅ 480p → source | limite la RAM et le temps |
@@ -126,7 +126,7 @@ Sortie : `app/build/outputs/apk/release/app-release.apk`.
 ### Tests
 
 ```bash
-./gradlew testDebugUnitTest        # 60 tests JVM (moteur RIFE vs référence Python, QNN, YUV, plan, nommage)
+./gradlew testDebugUnitTest        # 61 tests JVM (moteur RIFE vs référence Python, QNN, YUV, plan, nommage)
 ./gradlew connectedDebugAndroidTest # tests instrumentés (pipeline complet + UI) sur appareil/émulateur
 ```
 
@@ -151,7 +151,7 @@ adb shell am instrument -w \
 | Vérification | Résultat |
 |---|---|
 | Compilation (debug + release, lint vital) | ✅ |
-| 60 tests unitaires JVM | ✅ |
+| 61 tests unitaires JVM | ✅ |
 | Sortie du moteur RIFE identique à la référence Python (deux modèles, 3 phases) | ✅ |
 | APK signé, installé et démarré sur Android 12 (émulateur x86_64) | ✅ |
 | Encodage MP4 de bout en bout par `VideoEncoder` (images réelles) | ✅ |
@@ -423,17 +423,28 @@ Ce qu'il faut savoir :
 * Le réglage **Qualcomm NPU (QNN HTP)** n'apparaît que dans ce build et reste désactivé par défaut.
 * **Formes fixes obligatoires** : le backend HTP refuse les dimensions dynamiques. Le moteur
   résout `height`/`width` à la taille de traitement (déjà le cas pour le CPU) ; si les formes
-  restent dynamiques, QNN est désactivé et le CPU prend le relais.
+  restent dynamiques, la construction de la session QNN échoue explicitement (aucun repli CPU).
 * **FP16, pas INT8** : le graphe FP32 est exécuté en FP16 (`enable_htp_fp16_precision=1`). La
   quantification INT8 de RIFE s'effondre (12,6 dB PSNR mesurés par `tools/quantize_rife.py`).
 * **Une seule inférence à la fois** : le NPU est un seul accélérateur ; le pool force une session.
-  Les threads CPU restent disponibles pour les nœuds non pris en charge et pour les codecs.
-* **Repli automatique** : si la session QNN ne peut pas être créée (lib manquante, HTP absent,
-  SoC non reconnu), le moteur journalise la cause et construit une session CPU ; la tâche continue.
-* **Partitionnement** : QNN prend les nœuds qu'il supporte, ONNX Runtime renvoie le reste au CPU.
-  `GridSample` est supporté sur HTP en FP16 par QAIRT 2.42, donc le graphe RIFE peut être
-  largement offloadé. L'API Java d'ORT n'expose pas l'affectation nœud par nœud : le benchmark
-  compare le temps QNN au meilleur non-QNN, et un ratio proche de 1 signifie peu ou pas d'offload.
+  Les threads CPU restent disponibles pour les codecs, pas pour l'inférence : QNN est strict.
+* **Aucun repli CPU** : `session.disable_cpu_ep_fallback=1` est passé à ONNX Runtime. Si un nœud
+  ne peut pas être pris en charge par QNN (lib manquante, HTP absent, SoC non reconnu, opérateur
+  non supporté), la création de la session échoue et la tâche s'arrête avec la cause. C'est
+  volontaire : une session créée prouve que QNN a revendiqué tout le graphe.
+* **Pas de partitionnement** : QNN doit prendre **tous** les nœuds ; ONNX Runtime n'est pas
+  autorisé à renvoyer le reste au CPU. `GridSample` est supporté sur HTP en FP16 par QAIRT 2.42 ;
+  le benchmark permet de vérifier le graphe complet. Si un opérateur manque, la session échoue
+  avec son nom plutôt que de tourner partiellement sur le CPU.
+* **Profilage HTP** : le benchmark ajoute automatiquement deux lignes QNN dans un build QNN, même
+  si le réglage QNN est désactivé : un passage *profil* (niveau `detailed`, non classé) et un
+  passage *strict* propre pour la mesure. Le passage profil écrit un CSV et un `_qnn.log` dans
+  le dossier externe de l'app (`/sdcard/Android/data/com.flowframes.android/files/`), par exemple
+  `qnn-profile-6.csv` ; le rapport affiche le chemin, la taille et une liste des opérateurs
+  trouvés. Pour l'analyse officielle :
+  `adb pull /sdcard/Android/data/com.flowframes.android/files/qnn-profile-6.csv .` puis
+  `qnn-profile-viewer --input qnn-profile-6.csv` (SDK QNN). Le CSV liste les opérateurs exécutés
+  par le backend HTP ; comme la session est stricte, aucun nœud ne peut être sur le CPU.
 * **Première session lente** : le backend compile le graphe pour le HTP à la création de la
   session (plusieurs secondes à quelques dizaines de secondes selon le SoC et la résolution).
   Le benchmark mesure `session init` et le log de tâche affiche la durée de construction du pool.
@@ -450,30 +461,35 @@ Correspondances Snapdragon (QNN) :
 | Snapdragon 888 | 30 | V68 | `68` |
 
 Le backend HTP détecte le SoC et l'architecture à l'exécution ; le build ne garde que le Skel de
-l'architecture choisie par `-PqnnHtpArch`. Si la détection échoue, le log donne la cause et le CPU
-prend le relais.
+l'architecture choisie par `-PqnnHtpArch`. Si la détection échoue, la session QNN échoue avec la
+cause ; il n'y a pas de repli CPU.
 
 Diagnostic : le journal de l'app (boutons Copy/Share) contient les lignes `QNN: ...`. Pour les
 erreurs natives du backend, `adb logcat -s FlowFramesQnn onnxruntime`.
 
-Le log et le benchmark prouvent la **création de la session QNN**, pas l'affectation des nœuds :
-l'API Java d'ORT n'expose pas cette information (l'API native et les logs `onnxruntime` en
-verbosité élevée la détaillent, mais l'app ne les parse pas). Une session QNN peut donc encore
-exécuter une partie ou la totalité du graphe sur le CPU. C'est pourquoi la ligne du benchmark
-s'appelle « QNN HTP session » ; compare son `ms/inference` à celui des lignes non-QNN. Le rapport
-affiche aussi un ratio `QNN session vs best non-QNN` : proche de 1,00 = peu ou pas d'offload.
+Le log et le benchmark prouvent désormais l'**affectation des nœuds** : avec
+`session.disable_cpu_ep_fallback=1`, ONNX Runtime refuse de créer la session si un nœud doit
+rester sur le CPU. Une session QNN créée implique donc que QNN a revendiqué tout le graphe. Le
+profil CSV du benchmark donne en plus la liste des opérateurs exécutés par le HTP. Le rapport
+compare le temps QNN strict au meilleur non-QNN (`QNN strict vs best non-QNN`) ; c'est la mesure
+d'offload, pas la preuve de placement (qui vient de la session stricte).
 
-* `QNN: HTP session created (FP16); …` : la session QNN a été créée. Cela ne prouve pas que des
-  nœuds ont tourné sur le NPU ; comparer le temps QNN au CPU.
-* `QNN: session creation failed (…)` : lire la cause. Le plus fréquent est un build sans QNN, un
-  `-PqnnHtpArch` qui ne correspond pas au SoC, ou `No Snapdragon SOC detected` (SDK/arch).
-* `QNN: the HTP backend needs fixed height/width` : la résolution n'a pas été fixée ; ne devrait
-  pas arriver dans le pipeline, qui transmet toujours la taille de traitement.
+* `QNN: HTP session created (FP16, strict: QNN claimed the whole graph; no CPU EP fallback)` :
+  la session stricte a été créée ; tout le graphe est revendiqué par QNN.
+* `QNN HTP session failed (strict, no CPU fallback): …` : lire la cause. Le plus fréquent est un
+  build sans QNN, un `-PqnnHtpArch` qui ne correspond pas au SoC, `No Snapdragon SOC detected`
+  (SDK/arch), ou un opérateur non supporté par le HTP. La tâche s'arrête : c'est le comportement
+  demandé, il n'y a pas de repli CPU.
+* `QNN HTP requires fixed height/width; refusing to fall back to the CPU` : la résolution n'a pas
+  été fixée ; ne devrait pas arriver dans le pipeline, qui transmet toujours la taille de
+  traitement.
+* `QNN profile: /sdcard/.../qnn-profile-6.csv (… bytes) · N ops: …` : le passage profil a écrit le
+  CSV ; le chemin exact est dans le rapport copiable.
 
-État de validation : le variant QNN compile, les 60 tests JVM passent (dont `QnnConfigTest`) et
+État de validation : le variant QNN compile, les 61 tests JVM passent (dont `QnnConfigTest`) et
 l'APK contient `libQnnHtp.so`, `libQnnHtpPrepare.so`, `libQnnSystem.so`, `libQnnHtpV81Stub.so` et
-`libQnnHtpV81Skel.so`. **Il n'a pas été exécuté sur un Snapdragon réel dans cet environnement** :
-c'est le premier test à faire, avec le benchmark et `adb logcat`.
+`libQnnHtpV81Skel.so`. **Le mode strict et le profilage n'ont pas été exécutés sur un Snapdragon réel dans cet
+environnement** : c'est le premier test à faire, avec le benchmark et `adb logcat`.
 
 ## Limites connues
 
@@ -485,7 +501,9 @@ c'est le premier test à faire, avec le benchmark et `adb logcat`.
 * L'interpolation de RIFE est purement 2D : pas de vecteurs de mouvement 3D ni d'audio.
 * Sur un appareil sans encodeur HEVC, la sortie repasse automatiquement en H.264.
 * **QNN** : expérimental, build séparé `-Pqnn=true`, une seule architecture HTP par APK, APK
-  ~106 Mo avec V81, première session lente (compilation du graphe) et FP16 uniquement.
+  ~106 Mo avec V81, première session lente (compilation du graphe), FP16 uniquement, **strict
+  sans repli CPU** (un opérateur non supporté fait échouer la tâche) et profilage CSV uniquement
+  dans le benchmark.
 * Le NPU est partagé avec le reste du système : une autre application qui utilise l'IA peut
   dégrader fortement la latence, et le téléphone peut throttler sur un job long.
 

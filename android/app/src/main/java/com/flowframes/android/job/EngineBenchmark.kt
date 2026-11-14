@@ -51,7 +51,11 @@ object EngineBenchmark {
         val qnn: Boolean = false,
         val parallel: Boolean = false,
         val staticShapes: Boolean = true,
-        val rounds: Int = 3
+        val rounds: Int = 3,
+        /** QNN profiling pass: writes the HTP CSV and is not eligible for the winner. */
+        val profileQnn: Boolean = false,
+        /** Profiling overhead makes this row's timing meaningless. */
+        val excludeFromBest: Boolean = false
     )
 
     private data class Result(val config: Config, val msPerFrame: Double, val error: String?)
@@ -78,18 +82,29 @@ object EngineBenchmark {
         val perWorker = (autoThreads / autoWorkers).coerceAtLeast(1)
         val inferencesPerSourceFrame = (settings.factor - 1).coerceAtLeast(1)
 
-        val configs = ArrayList<Config>(8)
+        val configs = ArrayList<Config>(10)
         configs += Config("1 × ${autoThreads}T", workers = 1, threadsPerWorker = autoThreads, rounds = 3)
         configs += Config("2 × ${(autoThreads / 2).coerceAtLeast(1)}T", workers = 2, threadsPerWorker = (autoThreads / 2).coerceAtLeast(1))
         configs += Config("3 × ${perWorker}T", workers = 3, threadsPerWorker = perWorker)
         configs += Config("4 × 2T", workers = 4, threadsPerWorker = 2)
         configs += Config("XNNPACK 3 × ${perWorker}T", workers = 3, threadsPerWorker = perWorker, xnnpack = true)
         configs += Config("3 × ${perWorker}T dynamic shapes", workers = 3, threadsPerWorker = perWorker, staticShapes = false)
-        if (BuildConfig.QNN_BUILD && settings.useQnn) {
-            // One session: the NPU is a single device and each session compiles its own graph.
-            // The CPU threads are still there for any node the HTP backend does not claim.
+        if (BuildConfig.QNN_BUILD) {
+            // Two sessions, because profiling changes the provider options and its overhead would
+            // contaminate the timing: the first pass proves which QNN ops run and writes the CSV,
+            // the second is the clean strict timing. They are added even when the QNN setting is
+            // off: in a QNN build the benchmark must always report whether QNN works.
             configs += Config(
-                "QNN HTP session 1 × ${autoThreads}T",
+                "QNN HTP profile (strict, not ranked)",
+                workers = 1,
+                threadsPerWorker = autoThreads,
+                qnn = true,
+                rounds = 1,
+                profileQnn = true,
+                excludeFromBest = true
+            )
+            configs += Config(
+                "QNN HTP strict 1 × ${autoThreads}T",
                 workers = 1,
                 threadsPerWorker = autoThreads,
                 qnn = true
@@ -104,8 +119,8 @@ object EngineBenchmark {
         report("Sweeping ${configs.size} configurations, then a sustained pass on the winner…")
         if (configs.any { it.qnn }) {
             report(
-                "QNN: the row proves the HTP session was created, not that nodes ran on the NPU; " +
-                    "compare its ms/inference with the CPU rows."
+                "QNN: strict sessions (no CPU fallback). A profile pass writes the HTP CSV; " +
+                    "the separate clean row is the timing reference."
             )
         }
 
@@ -114,8 +129,20 @@ object EngineBenchmark {
         val out = FloatArray(width * height * 3)
         val results = ArrayList<Result>(configs.size)
         var topOps: List<String> = emptyList()
+        var qnnProfile: String? = null
 
         for ((index, cfg) in configs.withIndex()) {
+            val profileFile = if (cfg.profileQnn) {
+                File(
+                    context.getExternalFilesDir(null) ?: context.filesDir,
+                    "qnn-profile-${index}.csv"
+                ).also {
+                    it.parentFile?.mkdirs()
+                    // A failed session must not leave a previous run's CSV looking like a result.
+                    it.delete()
+                    File(it.parentFile, it.nameWithoutExtension + "_qnn.log").delete()
+                }
+            } else null
             val result = runCatching {
                 val t0 = System.currentTimeMillis()
                 val pool = InferencePool(
@@ -126,7 +153,11 @@ object EngineBenchmark {
                     useXnnpack = cfg.xnnpack,
                     qnn = if (cfg.qnn) {
                         val lib = File(context.applicationInfo.nativeLibraryDir, "libQnnHtp.so")
-                        QnnConfig(backendPath = if (lib.isFile) lib.absolutePath else "")
+                        QnnConfig(
+                            backendPath = if (lib.isFile) lib.absolutePath else "",
+                            profilingLevel = if (profileFile != null) "detailed" else null,
+                            profilingFilePath = profileFile?.absolutePath
+                        )
                     } else null,
                     parallelOps = cfg.parallel,
                     frameWidth = if (cfg.staticShapes) width else 0,
@@ -137,7 +168,7 @@ object EngineBenchmark {
                 pool.use { p ->
                     if (cfg.qnn && !p.primary.qnnSessionCreated) {
                         throw IllegalStateException(
-                            "QNN HTP session could not be created; the engine fell back to the CPU"
+                            "QNN HTP session could not be created (strict, no CPU fallback)"
                         )
                     }
                     p.warmUp(width, height)
@@ -161,15 +192,25 @@ object EngineBenchmark {
                         )
                     )
                     Result(cfg, perFrame, null)
+                }.also {
+                    if (profileFile != null) {
+                        qnnProfile = qnnProfileText(profileFile)
+                        report("QNN profile: $qnnProfile")
+                    }
                 }
             }.getOrElse { t ->
                 report("[${index + 1}/${configs.size}] ${cfg.label} → failed: ${t.message ?: t.javaClass.simpleName}")
+                if (profileFile != null) {
+                    qnnProfile = qnnProfileText(profileFile)
+                    report("QNN profile: $qnnProfile")
+                }
                 Result(cfg, Double.MAX_VALUE, t.message ?: t.javaClass.simpleName)
             }
             results += result
         }
 
-        val best = results.filter { it.error == null }.minByOrNull { it.msPerFrame }
+        val best = results.filter { it.error == null && !it.config.excludeFromBest }
+            .minByOrNull { it.msPerFrame }
 
         val sustained = best?.let { winner ->
             // A second QNN session would recompile the whole graph; keep the benchmark bounded.
@@ -191,6 +232,10 @@ object EngineBenchmark {
                 "model ${File(modelPath).name} · factor x${settings.factor}"
         )
         DeviceInfo.lines(context).forEach { sb.appendLine(it) }
+        sb.appendLine(
+            "QNN build: ${if (BuildConfig.QNN_BUILD) "yes" else "no"} · " +
+                "QNN setting: ${if (settings.useQnn) "on" else "off"}"
+        )
         sb.appendLine("--- results (ms per interpolated frame, lower is better) ---")
         results.sortedBy { it.msPerFrame }.forEach { r ->
             if (r.error == null) {
@@ -206,20 +251,25 @@ object EngineBenchmark {
                 sb.appendLine("   failed  ${r.config.label} — ${r.error}")
             }
         }
-        val qnnResult = results.filter { it.error == null && it.config.qnn }.minByOrNull { it.msPerFrame }
+        val qnnResult = results.filter { it.error == null && it.config.qnn && !it.config.excludeFromBest }
+            .minByOrNull { it.msPerFrame }
         val nonQnnBest = results.filter { it.error == null && !it.config.qnn }.minByOrNull { it.msPerFrame }
         if (qnnResult != null && nonQnnBest != null) {
             val ratio = nonQnnBest.msPerFrame / qnnResult.msPerFrame
             sb.appendLine(
-                "QNN session vs best non-QNN: ${String.format(Locale.US, "%.2f", ratio)}x " +
+                "QNN strict vs best non-QNN: ${String.format(Locale.US, "%.2f", ratio)}x " +
                     if (ratio >= 1.0) "faster" else "slower"
             )
             sb.appendLine(
-                "  (a ratio close to 1.00 means little or no effective QNN offload; " +
-                    "ORT's Java API does not expose node placement.)"
+                "  (strict QNN: creation succeeds only when QNN claimed every node; " +
+                    "the profile row lists the HTP ops.)"
             )
         } else if (results.any { it.config.qnn }) {
             sb.appendLine("QNN: no comparable non-QNN result; see the failed row above.")
+        }
+        if (qnnProfile != null) {
+            sb.appendLine("--- QNN HTP profile (strict, not timed) ---")
+            sb.appendLine("  $qnnProfile")
         }
         best?.let {
             val predicted = 1000.0 / (it.msPerFrame * inferencesPerSourceFrame)
@@ -276,6 +326,43 @@ object EngineBenchmark {
         return Report(sb.toString().trimEnd(), bestChoice)
     }
 
+    /** Reports the profile CSV and a best-effort list of the QNN ops it contains. */
+    private fun qnnProfileText(csv: File): String {
+        if (!csv.isFile) return "no CSV at ${csv.absolutePath}"
+        val log = File(csv.parentFile, csv.nameWithoutExtension + "_qnn.log")
+        val summary = runCatching { qnnProfileSummary(csv) }.getOrNull()
+        return buildString {
+            append(csv.absolutePath)
+            append(" (")
+            append(csv.length())
+            append(" bytes)")
+            if (summary != null) append(" · ").append(summary)
+            if (log.isFile) append(" · log: ").append(log.absolutePath)
+        }
+    }
+
+    private fun qnnProfileSummary(csv: File): String? {
+        val lines = csv.useLines { it.take(5000).toList() }
+        val headerIndex = lines.indexOfFirst { line ->
+            line.contains("Op", ignoreCase = true) &&
+                (line.contains("Name", ignoreCase = true) || line.contains("Type", ignoreCase = true))
+        }
+        if (headerIndex < 0) return null
+        val header = lines[headerIndex].split(',').map { it.trim().trim('"') }
+        val opColumn = header.indexOfFirst { name ->
+            name.contains("Op", ignoreCase = true) &&
+                (name.contains("Name", ignoreCase = true) || name.contains("Type", ignoreCase = true))
+        }
+        if (opColumn < 0) return null
+        val ops = lines.drop(headerIndex + 1)
+            .mapNotNull { line ->
+                line.split(',').getOrNull(opColumn)?.trim()?.trim('"')?.takeIf { it.isNotEmpty() }
+            }
+            .distinct()
+            .take(20)
+        return if (ops.isEmpty()) null else "${ops.size} ops: ${ops.joinToString(", ")}"
+    }
+
     private fun effectiveWorkers(settings: Settings, auto: Int): Int =
         if (settings.workers > 0) settings.workers else auto
 
@@ -287,7 +374,7 @@ object EngineBenchmark {
         val qnn = settings.useQnn && BuildConfig.QNN_BUILD
         val workers = if (qnn) 1 else effectiveWorkers(settings, autoWorkers).coerceAtMost(total)
         val provider = when {
-            qnn -> "QNN(HTP session)"
+            qnn -> "QNN(HTP strict)"
             settings.useNnapi -> "NNAPI,XNNPACK"
             settings.useXnnpack -> "XNNPACK"
             else -> "CPU"

@@ -134,9 +134,9 @@ fun SettingsScreen(
                 if (BuildConfig.QNN_BUILD) {
                     SwitchRow(
                         title = "Qualcomm NPU (QNN HTP)",
-                        description = "Requests a QNN HTP session for RIFE (fp16, fixed shapes). " +
-                            "Unsupported operators stay on the CPU, and the app cannot see the per-node split. " +
-                            "Run the benchmark and compare the QNN row with the CPU rows on this device.",
+                        description = "Requests a strict QNN HTP session for RIFE (fp16, fixed shapes). " +
+                            "If any node cannot run on the HTP, the job fails instead of falling back to the CPU. " +
+                            "The benchmark always tests QNN in this build and writes the HTP operator profile.",
                         checked = settings.useQnn,
                         onCheckedChange = { v -> onChange { s -> s.copy(useQnn = v) } }
                     )
@@ -340,8 +340,9 @@ fun SettingsScreen(
                 Text(
                     "The engine benchmark loads the model several ways (parallel sessions, thread count, " +
                         "execution provider, execution mode, static shapes), adds a sustained pass to expose " +
-                        "throttling, and reports the real cost per frame on this device. It takes about two " +
-                        "minutes and writes the result to the log, which stays copyable.",
+                        "throttling, and reports the real cost per frame on this device. A QNN build also runs " +
+                        "a profiling pass and a clean strict QNN pass, so it takes longer. The result is written " +
+                        "to the log, which stays copyable.",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

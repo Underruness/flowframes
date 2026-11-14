@@ -19,14 +19,14 @@ import java.util.Locale
  *    arithmetic folds away; the result is bit-identical (verified against the dynamic graph).
  *  - [profileDir] enables ONNX Runtime's per-node profiler, used by the in-app benchmark.
  *
- * [qnn] switches the session to the Qualcomm QNN execution provider (Hexagon HTP / NPU). The HTP
- * backend requires static shapes; when they are unavailable, or when the QNN session cannot be
- * created, the engine logs why and builds a normal CPU session instead. Unsupported nodes inside a
- * QNN session are partitioned back to the CPU by ONNX Runtime, so the job still completes even when
- * the graph is only partly offloaded.
+ * [qnn] switches the session to the Qualcomm QNN execution provider (Hexagon HTP / NPU). It is
+ * strict: `session.disable_cpu_ep_fallback=1` is set, so every node must be claimed by QNN. If the
+ * HTP backend cannot run the whole graph, session creation fails and the job fails with that
+ * cause; there is no CPU fallback. The HTP also requires fixed shapes, so a QNN engine refuses
+ * dynamic ones instead of silently switching to the CPU.
  *
- * The Java API only reports that the session was created; it does not expose the resulting node
- * placement, so [qnnSessionCreated] does not prove that nodes ran on the HTP.
+ * A created session therefore proves placement in a way the Java API cannot show directly: ONNX
+ * Runtime would have rejected the session if any node still needed the CPU EP.
  *
  * This class only uses `java.*` + ONNX Runtime APIs so it can run in plain JVM unit tests.
  */
@@ -63,8 +63,9 @@ class RifeEngine(
         private set
 
     /**
-     * True when ONNX Runtime created the QNN HTP session. This proves the provider initialized,
-     * not that any node was assigned to the NPU: the Java API does not expose node placement.
+     * True when ONNX Runtime created the strict QNN HTP session. Because
+     * `session.disable_cpu_ep_fallback=1` is set, creation succeeds only when QNN claimed the whole
+     * graph; a partly offloaded graph fails instead of running nodes on the CPU.
      */
     var qnnSessionCreated: Boolean = false
         private set
@@ -101,24 +102,20 @@ class RifeEngine(
         resolvedDims = accepted
         staticShapes = accepted.isNotEmpty()
 
-        if (qnn != null && !staticShapes) {
-            log("QNN: the HTP backend needs fixed height/width; shapes are dynamic, using the CPU")
-        }
-
-        // A failed QNN session must not fail the job: the CPU path is always available.
-        val qnnSession = if (qnn != null && staticShapes) {
-            runCatching { env.createSession(modelPath, newOptions(qnn)) }
-                .onFailure {
-                    log("QNN: session creation failed (${it.message ?: it.javaClass.simpleName}); using the CPU")
-                }
-                .getOrNull()
-        } else {
-            null
-        }
-
-        if (qnnSession != null) {
-            session = qnnSession
-            providers = "QNN(HTP session)"
+        if (qnn != null) {
+            check(staticShapes) {
+                "QNN HTP requires fixed height/width; refusing to fall back to the CPU"
+            }
+            session = try {
+                env.createSession(modelPath, newOptions(qnn))
+            } catch (t: Throwable) {
+                throw IllegalStateException(
+                    "QNN HTP session failed (strict, no CPU fallback): " +
+                        (t.message ?: t.javaClass.simpleName),
+                    t
+                )
+            }
+            providers = "QNN(HTP strict)"
             qnnSessionCreated = true
         } else {
             session = env.createSession(modelPath, newOptions(null))
@@ -155,7 +152,7 @@ class RifeEngine(
                 "inputs: $inputsSummary"
         )
         if (qnnSessionCreated) {
-            log("QNN: HTP session created (FP16); ORT's Java API does not report node placement")
+            log("QNN: HTP session created (FP16, strict: QNN claimed the whole graph; no CPU EP fallback)")
         }
     }
 
@@ -189,8 +186,9 @@ class RifeEngine(
         }
 
         if (qnnConfig != null) {
-            // QNN is registered before the CPU providers: it claims the nodes it supports and the
-            // remaining ones are partitioned back to the CPU.
+            // All-or-nothing: if any node would need the CPU EP, session creation fails instead
+            // of hiding a partial offload behind a CPU fallback.
+            opts.addConfigEntry("session.disable_cpu_ep_fallback", "1")
             opts.addQnn(qnnConfig.providerOptions())
         } else {
             if (useNnapi) {
