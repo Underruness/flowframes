@@ -15,10 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout the QNN commit
+      - name: Checkout the pushed commit
         uses: actions/checkout@v4
         with:
-          ref: 877d7147ae0cab5392b5662a54845eda06141e56
+          ref: ${{ github.sha }}
           lfs: true
 
       - name: Set up JDK 17
@@ -47,10 +47,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cp android/app/build/outputs/apk/release/app-release.apk FlowFrames-1.4.0-qnn-v81.apk
+          cp android/app/build/outputs/apk/release/app-release.apk FlowFrames-1.4.0-qnn-v81-strict.apk
           curl --fail --silent --show-error --location \
             -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Content-Type: application/vnd.android.package-archive" \
-            --data-binary @FlowFrames-1.4.0-qnn-v81.apk \
-            "https://uploads.github.com/repos/Underruness/flowframes/releases/445618239/assets?name=FlowFrames-1.4.0-qnn-v81.apk"
+            --data-binary @FlowFrames-1.4.0-qnn-v81-strict.apk \
+            "https://uploads.github.com/repos/Underruness/flowframes/releases/445635983/assets?name=FlowFrames-1.4.0-qnn-v81-strict.apk"
