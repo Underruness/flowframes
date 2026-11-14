@@ -31,6 +31,7 @@ class InferencePool(
     val threadsPerWorker: Int,
     useNnapi: Boolean = false,
     useXnnpack: Boolean = false,
+    qnn: QnnConfig? = null,
     parallelOps: Boolean = false,
     frameWidth: Int = 0,
     frameHeight: Int = 0,
@@ -60,6 +61,7 @@ class InferencePool(
                     intraOpThreads = threadsPerWorker,
                     useNnapi = useNnapi,
                     useXnnpack = useXnnpack,
+                    qnn = qnn,
                     parallelOps = parallelOps,
                     frameWidth = frameWidth,
                     frameHeight = frameHeight,
@@ -77,7 +79,8 @@ class InferencePool(
         }
         log(
             "Inference pool: $workers sessions × $threadsPerWorker threads " +
-                "(${workers * threadsPerWorker} threads, built in ${System.currentTimeMillis() - start} ms)"
+                "(${workers * threadsPerWorker} threads, built in ${System.currentTimeMillis() - start} ms)" +
+                if (qnn != null) " · QNN HTP requested" else ""
         )
     }
 

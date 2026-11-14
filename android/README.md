@@ -38,7 +38,8 @@ Le journal intégré affiche chaque étape (modèle, décodeur, images traitées
 
 | Fonction FlowFrames | Android | Remarque |
 |---|---|---|
-| Interpolation RIFE (NCNN/CUDA) | ✅ RIFE 4.9 via ONNX Runtime | XNNPACK (CPU) ou NNAPI |
+| Interpolation RIFE (NCNN/CUDA) | ✅ RIFE 4.9 via ONNX Runtime | XNNPACK (CPU), NNAPI, ou QNN HTP (NPU) |
+| Accélération NPU Qualcomm | ✅ build `-Pqnn=true` | QNN HTP, FP16, une session ; benchmark requis |
 | Facteur 2x / 3x / 4x / 8x | ✅ 2 → 8, phases quelconques | modèle à timestep variable |
 | Qualité « ensemble » | ✅ réglage Rapide / Haute qualité | deux modèles embarqués |
 | Résolution maximale | ✅ 480p → source | limite la RAM et le temps |
@@ -62,8 +63,10 @@ Le journal intégré affiche chaque étape (modèle, décodeur, images traitées
   appareil limité ; l'application affiche alors un message explicite.
 * **Qualité du modèle** : « Haute qualité » (ensemble) réduit les artefacts sur les mouvements
   rapides mais double environ le temps de calcul.
-* **NNAPI** : accélération par le processeur neuronal quand le constructeur l'expose. Les gains
-  varient énormément d'un appareil à l'autre ; en cas de plantage, laisser désactivé.
+* **NNAPI** : accélération générique par le processeur neuronal quand le constructeur l'expose.
+  Les gains varient énormément d'un appareil à l'autre et NNAPI est déprécié depuis Android 15.
+  **Sur Snapdragon, utiliser le build QNN ci-dessous** : il cible directement le NPU Hexagon et
+  mesure le résultat avec le banc d'essai.
 * **Threads CPU** : automatique par défaut (nombre de cœurs - 2). Utile à réduire si le
   téléphone chauffe.
 
@@ -72,7 +75,8 @@ Le journal intégré affiche chaque étape (modèle, décodeur, images traitées
 ```
 app/src/main/java/com/flowframes/android/
 ├── core/                  code pur JVM (testable sans appareil)
-│   ├── RifeEngine.kt      session ONNX Runtime + tenseurs planaires RGB
+│   ├── RifeEngine.kt      session ONNX Runtime (CPU ou QNN HTP) + tenseurs planaires RGB
+│   ├── QnnConfig.kt      options du QNN EP (HTP, FP16)
 │   ├── FrameMath.kt       ARGB ↔ plans flottants, redimensionnement, rotation, métriques
 │   ├── YuvConverter.kt    YUV 4:2:0 ↔ ARGB (BT.601/BT.709, limité/pleine plage)
 │   ├── InterpPlan.kt      facteur, phases, dé-duplication, changements de plan
@@ -88,6 +92,7 @@ app/src/main/java/com/flowframes/android/
 │   ├── JobStore.kt        état partagé UI ↔ service
 │   └── ModelStore.kt      extraction des modèles depuis les assets
 ├── ui/                    écrans Compose (file d'attente, réglages, journal)
+├── QnnEnvironment.kt      chemin de recherche DSP pour le backend HTP
 └── MainActivity.kt        sélecteurs SAF, permissions
 ```
 
@@ -121,7 +126,7 @@ Sortie : `app/build/outputs/apk/release/app-release.apk`.
 ### Tests
 
 ```bash
-./gradlew testDebugUnitTest        # 48 tests JVM (moteur RIFE vs référence Python, YUV, plan, nommage)
+./gradlew testDebugUnitTest        # 60 tests JVM (moteur RIFE vs référence Python, QNN, YUV, plan, nommage)
 ./gradlew connectedDebugAndroidTest # tests instrumentés (pipeline complet + UI) sur appareil/émulateur
 ```
 
@@ -146,7 +151,7 @@ adb shell am instrument -w \
 | Vérification | Résultat |
 |---|---|
 | Compilation (debug + release, lint vital) | ✅ |
-| 48 tests unitaires JVM | ✅ |
+| 60 tests unitaires JVM | ✅ |
 | Sortie du moteur RIFE identique à la référence Python (deux modèles, 3 phases) | ✅ |
 | APK signé, installé et démarré sur Android 12 (émulateur x86_64) | ✅ |
 | Encodage MP4 de bout en bout par `VideoEncoder` (images réelles) | ✅ |
@@ -218,6 +223,9 @@ Pistes écartées, avec la raison :
   RIFE (GridNet, nombreuses concaténations) ne supporte pas l'int8 sans entraînement spécifique.
 * **NNAPI** : l'option existe dans les réglages, mais NNAPI est déprécié depuis Android 15 et son
   gain est très variable selon le pilote du constructeur. Ce n'est pas activé par défaut.
+
+Le **NPU Hexagon** n'est pas inclus dans ces mesures : il est traité dans « NPU Qualcomm (QNN HTP) »
+plus bas. Les chiffres ci-dessus concernent le CPU et ne préjugent pas du gain sur HTP.
 
 ### Version 1.2.0 — mesure sur appareil et formes figées
 
@@ -385,6 +393,80 @@ Pistes suivantes, par ordre de rendement attendu :
 * **GPU** : `rife-ncnn-vulkan` est l'implémentation rapide de référence, mais elle demande du code
   natif NDK et un modèle ncnn ; impossible à valider depuis cette VM, donc pas livré.
 
+### NPU Qualcomm (QNN HTP) — expérimental
+
+Le moteur peut exécuter RIFE sur le **NPU Hexagon** via le *QNN Execution Provider* d'ONNX Runtime
+(backend HTP), au lieu du CPU/XNNPACK/NNAPI. C'est un build séparé : l'AAR Qualcomm est
+`arm64-v8a` uniquement et pèse lourd.
+
+```bash
+cd android
+./gradlew assembleRelease -Pqnn=true                  # SM8850, HTP V81 (défaut)
+./gradlew assembleRelease -Pqnn=true -PqnnHtpArch=79  # Snapdragon 8 Elite (SM8750)
+./gradlew assembleRelease -Pqnn=true -PqnnHtpArch=75  # Snapdragon 8 Gen 3
+```
+
+`-PqnnHtpArch` choisit la génération HTP conservée (68/69/73/75/79/81 ; 81 par défaut, SM8850).
+Le build ne garde qu'une seule génération : sans ce filtrage, `qnn-runtime` embarque les six et
+l'APK dépasse 250 Mo. Avec V81, l'APK de debug fait ~106 Mo (release ~96 Mo) ; les `.so` sont
+compressés dans l'APK et extraits à l'installation.
+
+Ce qu'il faut savoir :
+
+* **ONNX Runtime 1.24.3** : le build standard passe aussi à cette version, car l'API Java
+  `addQnn` n'existe pas en 1.19.2. Relancer le benchmark CPU après la mise à jour.
+* **Aucun SDK QNN n'est nécessaire pour compiler.** `onnxruntime-android-qnn:1.24.3` tire
+  `com.qualcomm.qti:qnn-runtime:2.42.0` depuis Maven Central, qui contient `libQnnHtp.so`,
+  `libQnnHtpPrepare.so`, `libQnnSystem.so` et les Stub/Skel v68→v81. Le SDK QNN reste utile pour
+  les outils hors ligne (`qnn-onnx-converter`, `qnn-context-binary-generator`, quantification
+  AIMET, `qnn-profile-viewer`).
+* Le réglage **Qualcomm NPU (QNN HTP)** n'apparaît que dans ce build et reste désactivé par défaut.
+* **Formes fixes obligatoires** : le backend HTP refuse les dimensions dynamiques. Le moteur
+  résout `height`/`width` à la taille de traitement (déjà le cas pour le CPU) ; si les formes
+  restent dynamiques, QNN est désactivé et le CPU prend le relais.
+* **FP16, pas INT8** : le graphe FP32 est exécuté en FP16 (`enable_htp_fp16_precision=1`). La
+  quantification INT8 de RIFE s'effondre (12,6 dB PSNR mesurés par `tools/quantize_rife.py`).
+* **Une seule inférence à la fois** : le NPU est un seul accélérateur ; le pool force une session.
+  Les threads CPU restent disponibles pour les nœuds non pris en charge et pour les codecs.
+* **Repli automatique** : si la session QNN ne peut pas être créée (lib manquante, HTP absent,
+  SoC non reconnu), le moteur journalise la cause et construit une session CPU ; la tâche continue.
+* **Partitionnement** : QNN prend les nœuds qu'il supporte, ONNX Runtime renvoie le reste au CPU.
+  `GridSample` est supporté sur HTP en FP16 par QAIRT 2.42, donc le graphe RIFE peut être
+  largement offloadé ; le log et le benchmark disent ce qu'il en est sur l'appareil.
+* **Première session lente** : le backend compile le graphe pour le HTP à la création de la
+  session (plusieurs secondes à quelques dizaines de secondes selon le SoC et la résolution).
+  Le benchmark mesure `session init` et le log de tâche affiche la durée de construction du pool.
+
+Correspondances Snapdragon (QNN) :
+
+| SoC | soc_model | HTP | `-PqnnHtpArch` |
+|---|---|---|---|
+| **Snapdragon 8 Elite Gen 5 (SM8850)** | **87** | **V81** | **`81` (défaut)** |
+| Snapdragon 8 Elite (SM8750) | 69 | V79 | `79` |
+| Snapdragon 8 Gen 3 (SM8650) | 57 | V75 | `75` |
+| Snapdragon 8 Gen 2 (SM8550) | 43 | V73 | `73` |
+| Snapdragon 8/8+ Gen 1 | 36/42 | V69 | `69` |
+| Snapdragon 888 | 30 | V68 | `68` |
+
+Le backend HTP détecte le SoC et l'architecture à l'exécution ; le build ne garde que le Skel de
+l'architecture choisie par `-PqnnHtpArch`. Si la détection échoue, le log donne la cause et le CPU
+prend le relais.
+
+Diagnostic : le journal de l'app (boutons Copy/Share) contient les lignes `QNN: ...`. Pour les
+erreurs natives du backend, `adb logcat -s FlowFramesQnn onnxruntime`.
+
+* `QNN: HTP active (FP16); …` : la session est bien sur le NPU. Comparer avec le CPU via le
+  benchmark avant de conclure.
+* `QNN: session creation failed (…)` : lire la cause. Le plus fréquent est un build sans QNN, un
+  `-PqnnHtpArch` qui ne correspond pas au SoC, ou `No Snapdragon SOC detected` (SDK/arch).
+* `QNN: the HTP backend needs fixed height/width` : la résolution n'a pas été fixée ; ne devrait
+  pas arriver dans le pipeline, qui transmet toujours la taille de traitement.
+
+État de validation : le variant QNN compile, les 60 tests JVM passent (dont `QnnConfigTest`) et
+l'APK contient `libQnnHtp.so`, `libQnnHtpPrepare.so`, `libQnnSystem.so`, `libQnnHtpV81Stub.so` et
+`libQnnHtpV81Skel.so`. **Il n'a pas été exécuté sur un Snapdragon réel dans cet environnement** :
+c'est le premier test à faire, avec le benchmark et `adb logcat`.
+
 ## Limites connues
 
 * Sortie **MP4 uniquement** (H.264 ou HEVC), pas de GIF/PNG/MKV.
@@ -394,6 +476,10 @@ Pistes suivantes, par ordre de rendement attendu :
   ce qui peut décaler légèrement les cas extrêmes.
 * L'interpolation de RIFE est purement 2D : pas de vecteurs de mouvement 3D ni d'audio.
 * Sur un appareil sans encodeur HEVC, la sortie repasse automatiquement en H.264.
+* **QNN** : expérimental, build séparé `-Pqnn=true`, une seule architecture HTP par APK, APK
+  ~106 Mo avec V81, première session lente (compilation du graphe) et FP16 uniquement.
+* Le NPU est partagé avec le reste du système : une autre application qui utilise l'IA peut
+  dégrader fortement la latence, et le téléphone peut throttler sur un job long.
 
 ## Crédits et licences
 
@@ -401,4 +487,7 @@ Pistes suivantes, par ordre de rendement attendu :
 * **RIFE / Practical-RIFE** (hzwer et al.) — réseau d'interpolation, licence MIT.
 * Exports ONNX utilisés : `yuvraj108c/rife-onnx` et `ChimairrA/rife49_ensemble_False_scale_1_sim`
   (Hugging Face, licence MIT), conversions du modèle RIFE 4.9 de `hzwer/ECCV2022-RIFE`.
-* **ONNX Runtime** (Microsoft, licence MIT) pour l'inférence.
+* **ONNX Runtime** (Microsoft, licence MIT) pour l'inférence, et son **QNN Execution Provider**
+  avec **Qualcomm qnn-runtime / QAIRT** pour l'exécution sur le NPU Hexagon. Les bibliothèques
+  Qualcomm sont redistribuées via l'AAR Maven `com.qualcomm.qti:qnn-runtime`, sous licence
+  Qualcomm AI Hub Model License.

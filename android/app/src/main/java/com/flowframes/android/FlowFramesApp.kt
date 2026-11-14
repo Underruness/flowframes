@@ -7,6 +7,7 @@ import com.flowframes.android.job.SettingsStore
 class FlowFramesApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        QnnEnvironment.prepare(this)
         AppGraph.init(SettingsStore(this))
     }
 }

@@ -35,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.flowframes.android.BuildConfig
 import com.flowframes.android.core.Naming
 import com.flowframes.android.job.AiQuality
 import com.flowframes.android.job.OutputCodec
@@ -129,6 +130,23 @@ fun SettingsScreen(
                     )
                 }
                 Caption("\"High quality\" runs RIFE in ensemble mode: fewer artefacts, roughly twice as slow.")
+
+                if (BuildConfig.QNN_BUILD) {
+                    SwitchRow(
+                        title = "Qualcomm NPU (QNN HTP)",
+                        description = "Runs RIFE on the Hexagon NPU through ONNX Runtime's QNN provider " +
+                            "(fp16, fixed shapes). Unsupported operators stay on the CPU, one inference runs at a " +
+                            "time, and the first session compiles the graph for the NPU. Run the benchmark to " +
+                            "compare it with the CPU on this device.",
+                        checked = settings.useQnn,
+                        onCheckedChange = { v -> onChange { s -> s.copy(useQnn = v) } }
+                    )
+                } else {
+                    Caption(
+                        "Qualcomm NPU: this build has no QNN runtime. Rebuild with " +
+                            "\"./gradlew assembleRelease -Pqnn=true\" (arm64-v8a only)."
+                    )
+                }
 
                 SwitchRow(
                     title = "XNNPACK provider",

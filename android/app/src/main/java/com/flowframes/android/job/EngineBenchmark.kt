@@ -1,9 +1,11 @@
 package com.flowframes.android.job
 
 import android.content.Context
+import com.flowframes.android.BuildConfig
 import com.flowframes.android.core.DeviceInfo
 import com.flowframes.android.core.FrameMath
 import com.flowframes.android.core.InferencePool
+import com.flowframes.android.core.QnnConfig
 import com.flowframes.android.core.RifeEngine
 import java.io.File
 import java.util.Locale
@@ -31,6 +33,7 @@ object EngineBenchmark {
         val threadsPerWorker: Int,
         val useXnnpack: Boolean,
         val parallelOps: Boolean,
+        val useQnn: Boolean,
         val msPerFrame: Double
     ) {
         /** Total inference threads, as stored in the settings. */
@@ -45,6 +48,7 @@ object EngineBenchmark {
         val threadsPerWorker: Int,
         val xnnpack: Boolean = false,
         val nnapi: Boolean = false,
+        val qnn: Boolean = false,
         val parallel: Boolean = false,
         val staticShapes: Boolean = true,
         val rounds: Int = 3
@@ -69,19 +73,28 @@ object EngineBenchmark {
         val height = ((fitH + 31) / 32) * 32
         val megapixels = width.toDouble() * height / 1_000_000.0
         val modelPath = ModelStore.prepare(context, settings.quality)
-        val cores = Runtime.getRuntime().availableProcessors()
         val autoWorkers = InferencePool.defaultWorkers()
         val autoThreads = RifeEngine.defaultThreads()
         val perWorker = (autoThreads / autoWorkers).coerceAtLeast(1)
         val inferencesPerSourceFrame = (settings.factor - 1).coerceAtLeast(1)
 
-        val configs = ArrayList<Config>(7)
+        val configs = ArrayList<Config>(8)
         configs += Config("1 × ${autoThreads}T", workers = 1, threadsPerWorker = autoThreads, rounds = 3)
         configs += Config("2 × ${(autoThreads / 2).coerceAtLeast(1)}T", workers = 2, threadsPerWorker = (autoThreads / 2).coerceAtLeast(1))
         configs += Config("3 × ${perWorker}T", workers = 3, threadsPerWorker = perWorker)
         configs += Config("4 × 2T", workers = 4, threadsPerWorker = 2)
         configs += Config("XNNPACK 3 × ${perWorker}T", workers = 3, threadsPerWorker = perWorker, xnnpack = true)
         configs += Config("3 × ${perWorker}T dynamic shapes", workers = 3, threadsPerWorker = perWorker, staticShapes = false)
+        if (BuildConfig.QNN_BUILD && settings.useQnn) {
+            // One session: the NPU is a single device and each session compiles its own graph.
+            // The CPU threads are still there for any node the HTP backend does not claim.
+            configs += Config(
+                "QNN HTP 1 × ${autoThreads}T",
+                workers = 1,
+                threadsPerWorker = autoThreads,
+                qnn = true
+            )
+        }
         if (settings.useNnapi) {
             configs += Config("NNAPI 3 × ${perWorker}T", workers = 3, threadsPerWorker = perWorker, xnnpack = true, nnapi = true, rounds = 1)
         }
@@ -105,12 +118,22 @@ object EngineBenchmark {
                     threadsPerWorker = cfg.threadsPerWorker,
                     useNnapi = cfg.nnapi,
                     useXnnpack = cfg.xnnpack,
+                    qnn = if (cfg.qnn) {
+                        val lib = File(context.applicationInfo.nativeLibraryDir, "libQnnHtp.so")
+                        QnnConfig(backendPath = if (lib.isFile) lib.absolutePath else "")
+                    } else null,
                     parallelOps = cfg.parallel,
                     frameWidth = if (cfg.staticShapes) width else 0,
                     frameHeight = if (cfg.staticShapes) height else 0,
-                    profileDir = if (index == 0) File(context.cacheDir, "ort-profile") else null
+                    profileDir = if (index == 0) File(context.cacheDir, "ort-profile") else null,
+                    log = if (cfg.qnn) report else { _: String -> }
                 )
                 pool.use { p ->
+                    if (cfg.qnn && !p.primary.qnnActive) {
+                        throw IllegalStateException(
+                            "QNN HTP session could not be created; the engine fell back to the CPU"
+                        )
+                    }
                     p.warmUp(width, height)
                     val initMs = System.currentTimeMillis() - t0
                     val start = System.nanoTime()
@@ -143,7 +166,8 @@ object EngineBenchmark {
         val best = results.filter { it.error == null }.minByOrNull { it.msPerFrame }
 
         val sustained = best?.let { winner ->
-            if (winner.config.nnapi) null else runCatching {
+            // A second QNN session would recompile the whole graph; keep the benchmark bounded.
+            if (winner.config.nnapi || winner.config.qnn) null else runCatching {
                 runSustained(
                     modelPath, winner.config, width, height, frames0, frames1, out,
                     megapixels, inferencesPerSourceFrame, context, report
@@ -187,7 +211,8 @@ object EngineBenchmark {
             val same = effectiveWorkers(settings, autoWorkers) == it.config.workers &&
                 effectiveTotalThreads(settings, autoThreads) == it.config.workers * it.config.threadsPerWorker &&
                 it.config.xnnpack == settings.useXnnpack &&
-                it.config.parallel == settings.parallelOps
+                it.config.parallel == settings.parallelOps &&
+                it.config.qnn == (settings.useQnn && BuildConfig.QNN_BUILD)
             if (same) {
                 sb.appendLine("→ Current settings already match the measured optimum.")
             } else {
@@ -199,6 +224,12 @@ object EngineBenchmark {
                         "${it.config.workers}× the model's memory while a job runs."
                 )
             }
+        }
+        if (best?.config?.qnn == true) {
+            sb.appendLine(
+                "Sustained pass skipped for QNN: every session compiles the graph for the NPU. " +
+                    "Read the job log for thermal status and per-minute inference latency."
+            )
         }
         if (sustained != null) {
             sb.appendLine("--- sustained pass (${SUSTAINED_ROUNDS} rounds of ${best.config.workers} inferences) ---")
@@ -217,6 +248,7 @@ object EngineBenchmark {
                 threadsPerWorker = it.config.threadsPerWorker,
                 useXnnpack = it.config.xnnpack,
                 parallelOps = it.config.parallel,
+                useQnn = it.config.qnn,
                 msPerFrame = it.msPerFrame
             )
         }
@@ -231,10 +263,15 @@ object EngineBenchmark {
 
     private fun describeCurrent(settings: Settings, autoThreads: Int, autoWorkers: Int): String {
         val total = effectiveTotalThreads(settings, autoThreads)
-        val workers = effectiveWorkers(settings, autoWorkers).coerceAtMost(total)
-        val ep = if (settings.useNnapi) "NNAPI," else ""
-        return "$workers × ${(total / workers).coerceAtLeast(1)}T · $ep" +
-            "${if (settings.useXnnpack) "XNNPACK" else "CPU"} · " +
+        val qnn = settings.useQnn && BuildConfig.QNN_BUILD
+        val workers = if (qnn) 1 else effectiveWorkers(settings, autoWorkers).coerceAtMost(total)
+        val provider = when {
+            qnn -> "QNN(HTP)"
+            settings.useNnapi -> "NNAPI,XNNPACK"
+            settings.useXnnpack -> "XNNPACK"
+            else -> "CPU"
+        }
+        return "$workers × ${(total / workers).coerceAtLeast(1)}T · $provider · " +
             (if (settings.parallelOps) "parallel" else "sequential") + " ops · static shapes"
     }
 

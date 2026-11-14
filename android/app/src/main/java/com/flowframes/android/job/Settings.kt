@@ -32,6 +32,11 @@ data class Settings(
     val maxOutputFps: Double = 0.0,
     val useNnapi: Boolean = false,
     /**
+     * Run RIFE on the Hexagon NPU through ONNX Runtime's QNN provider (HTP backend). Only present
+     * in builds made with -Pqnn=true; the engine falls back to the CPU when the NPU is unavailable.
+     */
+    val useQnn: Boolean = false,
+    /**
      * XNNPACK execution provider. Measured on a Snapdragon 8 Elite, CPU (MLAS) won by ~8 %: this
      * graph's GridSample/Div/Transpose operators are not covered by XNNPACK, so it only pays for
      * layout conversions. The in-app benchmark is the arbiter for any other device.
@@ -96,6 +101,7 @@ class SettingsStore(context: Context) {
             namePattern = prefs.getString("namePattern", d.namePattern) ?: d.namePattern,
             maxOutputFps = prefs.getFloat("maxOutputFps", d.maxOutputFps.toFloat()).toDouble(),
             useNnapi = prefs.getBoolean("useNnapi", d.useNnapi),
+            useQnn = prefs.getBoolean("useQnn", d.useQnn),
             useXnnpack = prefs.getBoolean("useXnnpack", d.useXnnpack),
             parallelOps = prefs.getBoolean("parallelOps", d.parallelOps),
             threads = prefs.getInt("threads", d.threads).coerceIn(0, 16),
@@ -120,6 +126,7 @@ class SettingsStore(context: Context) {
             .putString("namePattern", s.namePattern)
             .putFloat("maxOutputFps", s.maxOutputFps.toFloat())
             .putBoolean("useNnapi", s.useNnapi)
+            .putBoolean("useQnn", s.useQnn)
             .putBoolean("useXnnpack", s.useXnnpack)
             .putBoolean("parallelOps", s.parallelOps)
             .putInt("threads", s.threads)

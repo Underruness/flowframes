@@ -205,6 +205,7 @@ class MainActivity : ComponentActivity() {
                                         workers = best.workers,
                                         useXnnpack = best.useXnnpack,
                                         parallelOps = best.parallelOps,
+                                        useQnn = best.useQnn,
                                         useNnapi = false
                                     )
                                 }

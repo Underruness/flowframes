@@ -19,18 +19,26 @@ import java.util.Locale
  *    arithmetic folds away; the result is bit-identical (verified against the dynamic graph).
  *  - [profileDir] enables ONNX Runtime's per-node profiler, used by the in-app benchmark.
  *
+ * [qnn] switches the session to the Qualcomm QNN execution provider (Hexagon HTP / NPU). The HTP
+ * backend requires static shapes; when they are unavailable, or when the QNN session cannot be
+ * created, the engine logs why and builds a normal CPU session instead. Unsupported nodes inside a
+ * QNN session are partitioned back to the CPU by ONNX Runtime, so the job still completes even when
+ * the graph is only partly offloaded.
+ *
  * This class only uses `java.*` + ONNX Runtime APIs so it can run in plain JVM unit tests.
  */
 class RifeEngine(
     modelPath: String,
     intraOpThreads: Int = 4,
-    useNnapi: Boolean = false,
-    useXnnpack: Boolean = false,
+    private val useNnapi: Boolean = false,
+    private val useXnnpack: Boolean = false,
+    /** QNN HTP session options, or null to stay on the CPU. */
+    private val qnn: QnnConfig? = null,
     /** Run independent branches of the graph concurrently instead of one operator at a time. */
-    parallelOps: Boolean = false,
+    private val parallelOps: Boolean = false,
     frameWidth: Int = 0,
     frameHeight: Int = 0,
-    profileDir: File? = null,
+    private val profileDir: File? = null,
     private val log: (String) -> Unit = {}
 ) : AutoCloseable {
 
@@ -43,12 +51,21 @@ class RifeEngine(
 
     val modelName: String = File(modelPath).name
     val staticShapes: Boolean
+    /** Symbolic names this graph accepts, with the value that was probed for each. */
+    private val resolvedDims: List<Pair<String, Int>>
     val threads: Int
-    val providers: String
+
+    /** Execution providers actually used, for the job log and the benchmark report. */
+    var providers: String = "CPU"
+        private set
+
+    /** True when the session was created on the QNN HTP backend (the NPU). */
+    var qnnActive: Boolean = false
+        private set
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     private val session: OrtSession
-    private val profileFile: String?
+    private var profileFile: String? = null
 
     private var concatBuffer: FloatArray = FloatArray(0)
     private var concatBufferView: FloatBuffer = FloatBuffer.wrap(concatBuffer)
@@ -56,53 +73,54 @@ class RifeEngine(
     init {
         require(File(modelPath).isFile) { "Model not found: $modelPath" }
         threads = if (intraOpThreads > 0) intraOpThreads else defaultThreads()
-        val opts = OrtSession.SessionOptions()
-        opts.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-        opts.setExecutionMode(
-            if (parallelOps) OrtSession.SessionOptions.ExecutionMode.PARALLEL
-            else OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL
-        )
-        opts.setIntraOpNumThreads(threads)
-        opts.setInterOpNumThreads(1)
 
-        var static = false
+        val accepted = ArrayList<Pair<String, Int>>(4)
         if (frameWidth > 0 && frameHeight > 0) {
             // The exported RIFE graph names its dynamic dimensions `height` and `width`.
             // Unknown names are rejected by ORT, so each candidate is tried independently.
-            for ((name, value) in listOf(
-                "height" to frameHeight, "width" to frameWidth,
-                "H" to frameHeight, "W" to frameWidth
-            )) {
-                val ok = runCatching { opts.setSymbolicDimensionValue(name, value.toLong()) }.isSuccess
-                if (ok) static = true
+            val probe = OrtSession.SessionOptions()
+            try {
+                for ((name, value) in listOf(
+                    "height" to frameHeight, "width" to frameWidth,
+                    "H" to frameHeight, "W" to frameWidth
+                )) {
+                    if (runCatching { probe.setSymbolicDimensionValue(name, value.toLong()) }.isSuccess) {
+                        accepted += name to value
+                    }
+                }
+            } finally {
+                runCatching { probe.close() }
             }
         }
-        staticShapes = static
-        providers = buildString {
-            if (useNnapi) append("NNAPI,")
-            append(if (useXnnpack) "XNNPACK" else "CPU")
+        resolvedDims = accepted
+        staticShapes = accepted.isNotEmpty()
+
+        if (qnn != null && !staticShapes) {
+            log("QNN: the HTP backend needs fixed height/width; shapes are dynamic, using the CPU")
         }
 
-        if (useNnapi) {
-            runCatching { opts.addNnapi() }
-                .onSuccess { log("ORT: NNAPI enabled") }
-                .onFailure { log("ORT: NNAPI unavailable (${it.message}), using CPU") }
-        }
-        if (useXnnpack) {
-            runCatching { opts.addXnnpack(emptyMap()) }
-                .onSuccess { log("ORT: XNNPACK enabled") }
-                .onFailure { log("ORT: XNNPACK unavailable (${it.message})") }
-        }
-        profileFile = profileDir?.let { dir ->
-            runCatching {
-                dir.mkdirs()
-                val f = File(dir, "ort-profile-${System.currentTimeMillis()}.json")
-                opts.enableProfiling(f.absolutePath)
-                f.absolutePath
-            }.onFailure { log("ORT: profiling unavailable (${it.message})") }.getOrNull()
+        // A failed QNN session must not fail the job: the CPU path is always available.
+        val qnnSession = if (qnn != null && staticShapes) {
+            runCatching { env.createSession(modelPath, newOptions(qnn)) }
+                .onFailure {
+                    log("QNN: session creation failed (${it.message ?: it.javaClass.simpleName}); using the CPU")
+                }
+                .getOrNull()
+        } else {
+            null
         }
 
-        session = env.createSession(modelPath, opts)
+        if (qnnSession != null) {
+            session = qnnSession
+            providers = "QNN(HTP)"
+            qnnActive = true
+        } else {
+            session = env.createSession(modelPath, newOptions(null))
+            providers = buildString {
+                if (useNnapi) append("NNAPI,")
+                append(if (useXnnpack) "XNNPACK" else "CPU")
+            }
+        }
 
         val inputs = session.inputInfo.entries.toList()
         val frameInputs = inputs.filter { (name, info) ->
@@ -120,7 +138,7 @@ class RifeEngine(
         timestepInput = ts?.key
         timestepShape = (ts?.value?.info as? TensorInfo)?.shape ?: longArrayOf(1)
 
-        val shape = if (static) "${frameWidth}x$frameHeight (static)" else "dynamic"
+        val shape = if (staticShapes) "${frameWidth}x$frameHeight (static)" else "dynamic"
         val inputsSummary = inputs.joinToString(", ") { (name, info) ->
             val dims = (info.info as? TensorInfo)?.shape?.joinToString("x") ?: "?"
             "$name[$dims]"
@@ -130,6 +148,57 @@ class RifeEngine(
                 "$threads threads · $providers · ${if (parallelOps) "parallel" else "sequential"} ops · " +
                 "inputs: $inputsSummary"
         )
+        if (qnnActive) {
+            log("QNN: HTP active (FP16); unsupported nodes run on the CPU")
+        }
+    }
+
+    /** Builds a fresh option set; a failed session must not leave options in a half-initialised state. */
+    private fun newOptions(qnnConfig: QnnConfig?): OrtSession.SessionOptions {
+        val opts = OrtSession.SessionOptions()
+        opts.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+        opts.setExecutionMode(
+            if (parallelOps) OrtSession.SessionOptions.ExecutionMode.PARALLEL
+            else OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL
+        )
+        opts.setIntraOpNumThreads(threads)
+        opts.setInterOpNumThreads(1)
+
+        if (staticShapes) {
+            // The probe in init established which symbolic names this graph accepts; reuse the
+            // exact values so the QNN provider sees a fully static graph.
+            for ((name, value) in resolvedDims) {
+                opts.setSymbolicDimensionValue(name, value.toLong())
+            }
+        }
+
+        val dir = profileDir
+        if (dir != null) {
+            runCatching {
+                dir.mkdirs()
+                val file = File(dir, "ort-profile-${System.nanoTime()}.json")
+                opts.enableProfiling(file.absolutePath)
+                profileFile = file.absolutePath
+            }.onFailure { log("ORT: profiling unavailable (${it.message})") }
+        }
+
+        if (qnnConfig != null) {
+            // QNN is registered before the CPU providers: it claims the nodes it supports and the
+            // remaining ones are partitioned back to the CPU.
+            opts.addQnn(qnnConfig.providerOptions())
+        } else {
+            if (useNnapi) {
+                runCatching { opts.addNnapi() }
+                    .onSuccess { log("ORT: NNAPI enabled") }
+                    .onFailure { log("ORT: NNAPI unavailable (${it.message}), using CPU") }
+            }
+            if (useXnnpack) {
+                runCatching { opts.addXnnpack(emptyMap()) }
+                    .onSuccess { log("ORT: XNNPACK enabled") }
+                    .onFailure { log("ORT: XNNPACK unavailable (${it.message})") }
+            }
+        }
+        return opts
     }
 
     /**

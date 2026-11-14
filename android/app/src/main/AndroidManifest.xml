@@ -20,6 +20,12 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.FlowFrames">
 
+        <!-- QNN talks to the Hexagon through the FastRPC vendor library. Declaring it is required
+             on Android 12+ for the HTP backend to open its DSP channel. -->
+        <uses-native-library
+            android:name="libcdsprpc.so"
+            android:required="false" />
+
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|keyboardHidden|uiMode"

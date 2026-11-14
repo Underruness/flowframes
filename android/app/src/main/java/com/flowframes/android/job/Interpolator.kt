@@ -16,7 +16,9 @@ import com.flowframes.android.core.InterpPlan
 import com.flowframes.android.core.LatencyStats
 import com.flowframes.android.core.Naming
 import com.flowframes.android.core.OrderedWindow
+import com.flowframes.android.core.QnnConfig
 import com.flowframes.android.core.RifeEngine
+import com.flowframes.android.BuildConfig
 import com.flowframes.android.video.VideoDecoder
 import com.flowframes.android.video.VideoEncoder
 import com.flowframes.android.video.VideoInfo
@@ -167,27 +169,48 @@ class Interpolator(
             }
 
             val modelPath = ModelStore.prepare(context, settings.quality, log)
+            val qnnEnabled = settings.useQnn && BuildConfig.QNN_BUILD
+            if (settings.useQnn && !BuildConfig.QNN_BUILD) {
+                log("QNN requested but this APK has no QNN runtime; rebuild with -Pqnn=true. Using the CPU.")
+            }
             val automatic = RifeEngine.defaultThreads()
             val totalThreads = if (settings.threads > 0) settings.threads else automatic
-            val workers = (if (settings.workers > 0) settings.workers else InferencePool.defaultWorkers())
-                .coerceAtMost(totalThreads)
-            val threadsPerWorker = (totalThreads / workers).coerceAtLeast(1)
+            // The NPU is a single device: extra sessions would only duplicate the compiled graph.
+            // The threads stay available for the CPU fallback nodes and the codecs.
+            val workers = if (qnnEnabled) 1 else {
+                (if (settings.workers > 0) settings.workers else InferencePool.defaultWorkers())
+                    .coerceAtMost(totalThreads)
+            }
+            val threadsPerWorker = if (qnnEnabled) totalThreads else (totalThreads / workers).coerceAtLeast(1)
             log(
                 "Threads: $totalThreads" +
                     (if (settings.threads > 0) " (manual)" else " (automatic: cores - 2, capped at 6)") +
                     " · $workers parallel inference(s) of $threadsPerWorker threads · " +
                     "${settings.factor - 1} inference(s) per source frame"
             )
-            if (settings.useNnapi) {
+            if (qnnEnabled) {
+                log(
+                    "QNN: Hexagon NPU requested (HTP, fp16) · one inference at a time · fixed ${targetW}x$targetH shapes · " +
+                        "the first session compiles the graph and can take a while"
+                )
+            }
+            if (settings.useNnapi && qnnEnabled) {
+                log("NNAPI ignored while QNN is active")
+            } else if (settings.useNnapi) {
                 log("NNAPI requested: it was 6x slower than the CPU on a Snapdragon 8 Elite. Run the benchmark to compare on this device.")
             }
+            val qnnLib = File(context.applicationInfo.nativeLibraryDir, "libQnnHtp.so")
+            val qnnConfig = if (qnnEnabled) {
+                QnnConfig(backendPath = if (qnnLib.isFile) qnnLib.absolutePath else "")
+            } else null
 
             InferencePool(
                 modelPath = modelPath,
                 workers = workers,
                 threadsPerWorker = threadsPerWorker,
-                useNnapi = settings.useNnapi,
+                useNnapi = settings.useNnapi && !qnnEnabled,
                 useXnnpack = settings.useXnnpack,
+                qnn = qnnConfig,
                 parallelOps = settings.parallelOps,
                 frameWidth = targetW,
                 frameHeight = targetH,
