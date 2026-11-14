@@ -32,8 +32,9 @@ data class Settings(
     val maxOutputFps: Double = 0.0,
     val useNnapi: Boolean = false,
     /**
-     * Run RIFE on the Hexagon NPU through ONNX Runtime's QNN provider (HTP backend). Only present
-     * in builds made with -Pqnn=true; the engine falls back to the CPU when the NPU is unavailable.
+     * Request a QNN HTP session for RIFE. Only present in builds made with -Pqnn=true; the engine
+     * falls back to the CPU when the session cannot be created. The Java API does not report
+     * whether the HTP claimed the nodes, so this is a request, not a guarantee.
      */
     val useQnn: Boolean = false,
     /**

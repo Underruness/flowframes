@@ -190,7 +190,7 @@ class Interpolator(
             )
             if (qnnEnabled) {
                 log(
-                    "QNN: Hexagon NPU requested (HTP, fp16) · one inference at a time · fixed ${targetW}x$targetH shapes · " +
+                    "QNN: HTP session requested (FP16) · one inference at a time · fixed ${targetW}x$targetH shapes · " +
                         "the first session compiles the graph and can take a while"
                 )
             }

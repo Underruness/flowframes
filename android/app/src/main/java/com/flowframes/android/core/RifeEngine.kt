@@ -25,6 +25,9 @@ import java.util.Locale
  * QNN session are partitioned back to the CPU by ONNX Runtime, so the job still completes even when
  * the graph is only partly offloaded.
  *
+ * The Java API only reports that the session was created; it does not expose the resulting node
+ * placement, so [qnnSessionCreated] does not prove that nodes ran on the HTP.
+ *
  * This class only uses `java.*` + ONNX Runtime APIs so it can run in plain JVM unit tests.
  */
 class RifeEngine(
@@ -55,12 +58,15 @@ class RifeEngine(
     private val resolvedDims: List<Pair<String, Int>>
     val threads: Int
 
-    /** Execution providers actually used, for the job log and the benchmark report. */
+    /** Provider backing the session, for the job log and the benchmark report. */
     var providers: String = "CPU"
         private set
 
-    /** True when the session was created on the QNN HTP backend (the NPU). */
-    var qnnActive: Boolean = false
+    /**
+     * True when ONNX Runtime created the QNN HTP session. This proves the provider initialized,
+     * not that any node was assigned to the NPU: the Java API does not expose node placement.
+     */
+    var qnnSessionCreated: Boolean = false
         private set
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
@@ -112,8 +118,8 @@ class RifeEngine(
 
         if (qnnSession != null) {
             session = qnnSession
-            providers = "QNN(HTP)"
-            qnnActive = true
+            providers = "QNN(HTP session)"
+            qnnSessionCreated = true
         } else {
             session = env.createSession(modelPath, newOptions(null))
             providers = buildString {
@@ -148,8 +154,8 @@ class RifeEngine(
                 "$threads threads · $providers · ${if (parallelOps) "parallel" else "sequential"} ops · " +
                 "inputs: $inputsSummary"
         )
-        if (qnnActive) {
-            log("QNN: HTP active (FP16); unsupported nodes run on the CPU")
+        if (qnnSessionCreated) {
+            log("QNN: HTP session created (FP16); ORT's Java API does not report node placement")
         }
     }
 

@@ -134,10 +134,9 @@ fun SettingsScreen(
                 if (BuildConfig.QNN_BUILD) {
                     SwitchRow(
                         title = "Qualcomm NPU (QNN HTP)",
-                        description = "Runs RIFE on the Hexagon NPU through ONNX Runtime's QNN provider " +
-                            "(fp16, fixed shapes). Unsupported operators stay on the CPU, one inference runs at a " +
-                            "time, and the first session compiles the graph for the NPU. Run the benchmark to " +
-                            "compare it with the CPU on this device.",
+                        description = "Requests a QNN HTP session for RIFE (fp16, fixed shapes). " +
+                            "Unsupported operators stay on the CPU, and the app cannot see the per-node split. " +
+                            "Run the benchmark and compare the QNN row with the CPU rows on this device.",
                         checked = settings.useQnn,
                         onCheckedChange = { v -> onChange { s -> s.copy(useQnn = v) } }
                     )

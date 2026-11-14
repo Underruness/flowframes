@@ -89,7 +89,7 @@ object EngineBenchmark {
             // One session: the NPU is a single device and each session compiles its own graph.
             // The CPU threads are still there for any node the HTP backend does not claim.
             configs += Config(
-                "QNN HTP 1 × ${autoThreads}T",
+                "QNN HTP session 1 × ${autoThreads}T",
                 workers = 1,
                 threadsPerWorker = autoThreads,
                 qnn = true
@@ -102,6 +102,12 @@ object EngineBenchmark {
         report("Benchmark: ${width}x$height canvas (${String.format(Locale.US, "%.2f", megapixels)} MPx) · ${File(modelPath).name}")
         report(DeviceInfo.headline(context))
         report("Sweeping ${configs.size} configurations, then a sustained pass on the winner…")
+        if (configs.any { it.qnn }) {
+            report(
+                "QNN: the row proves the HTP session was created, not that nodes ran on the NPU; " +
+                    "compare its ms/inference with the CPU rows."
+            )
+        }
 
         val frames0 = FloatArray(width * height * 3) { (it % 251) / 251f }
         val frames1 = FloatArray(width * height * 3) { (it % 197) / 197f }
@@ -129,7 +135,7 @@ object EngineBenchmark {
                     log = if (cfg.qnn) report else { _: String -> }
                 )
                 pool.use { p ->
-                    if (cfg.qnn && !p.primary.qnnActive) {
+                    if (cfg.qnn && !p.primary.qnnSessionCreated) {
                         throw IllegalStateException(
                             "QNN HTP session could not be created; the engine fell back to the CPU"
                         )
@@ -200,6 +206,21 @@ object EngineBenchmark {
                 sb.appendLine("   failed  ${r.config.label} — ${r.error}")
             }
         }
+        val qnnResult = results.filter { it.error == null && it.config.qnn }.minByOrNull { it.msPerFrame }
+        val nonQnnBest = results.filter { it.error == null && !it.config.qnn }.minByOrNull { it.msPerFrame }
+        if (qnnResult != null && nonQnnBest != null) {
+            val ratio = nonQnnBest.msPerFrame / qnnResult.msPerFrame
+            sb.appendLine(
+                "QNN session vs best non-QNN: ${String.format(Locale.US, "%.2f", ratio)}x " +
+                    if (ratio >= 1.0) "faster" else "slower"
+            )
+            sb.appendLine(
+                "  (a ratio close to 1.00 means little or no effective QNN offload; " +
+                    "ORT's Java API does not expose node placement.)"
+            )
+        } else if (results.any { it.config.qnn }) {
+            sb.appendLine("QNN: no comparable non-QNN result; see the failed row above.")
+        }
         best?.let {
             val predicted = 1000.0 / (it.msPerFrame * inferencesPerSourceFrame)
             sb.appendLine("--- winner: ${it.config.label} (${String.format(Locale.US, "%.0f", it.msPerFrame)} ms/frame) ---")
@@ -227,7 +248,7 @@ object EngineBenchmark {
         }
         if (best?.config?.qnn == true) {
             sb.appendLine(
-                "Sustained pass skipped for QNN: every session compiles the graph for the NPU. " +
+                "Sustained pass skipped for QNN: every session compiles the graph for the HTP. " +
                     "Read the job log for thermal status and per-minute inference latency."
             )
         }
@@ -266,7 +287,7 @@ object EngineBenchmark {
         val qnn = settings.useQnn && BuildConfig.QNN_BUILD
         val workers = if (qnn) 1 else effectiveWorkers(settings, autoWorkers).coerceAtMost(total)
         val provider = when {
-            qnn -> "QNN(HTP)"
+            qnn -> "QNN(HTP session)"
             settings.useNnapi -> "NNAPI,XNNPACK"
             settings.useXnnpack -> "XNNPACK"
             else -> "CPU"

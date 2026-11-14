@@ -39,7 +39,7 @@ Le journal intégré affiche chaque étape (modèle, décodeur, images traitées
 | Fonction FlowFrames | Android | Remarque |
 |---|---|---|
 | Interpolation RIFE (NCNN/CUDA) | ✅ RIFE 4.9 via ONNX Runtime | XNNPACK (CPU), NNAPI, ou QNN HTP (NPU) |
-| Accélération NPU Qualcomm | ✅ build `-Pqnn=true` | QNN HTP, FP16, une session ; benchmark requis |
+| Accélération NPU Qualcomm | ✅ build `-Pqnn=true` | QNN HTP (session), FP16, une session ; comparer au CPU |
 | Facteur 2x / 3x / 4x / 8x | ✅ 2 → 8, phases quelconques | modèle à timestep variable |
 | Qualité « ensemble » | ✅ réglage Rapide / Haute qualité | deux modèles embarqués |
 | Résolution maximale | ✅ 480p → source | limite la RAM et le temps |
@@ -432,7 +432,8 @@ Ce qu'il faut savoir :
   SoC non reconnu), le moteur journalise la cause et construit une session CPU ; la tâche continue.
 * **Partitionnement** : QNN prend les nœuds qu'il supporte, ONNX Runtime renvoie le reste au CPU.
   `GridSample` est supporté sur HTP en FP16 par QAIRT 2.42, donc le graphe RIFE peut être
-  largement offloadé ; le log et le benchmark disent ce qu'il en est sur l'appareil.
+  largement offloadé. L'API Java d'ORT n'expose pas l'affectation nœud par nœud : le benchmark
+  compare le temps QNN au meilleur non-QNN, et un ratio proche de 1 signifie peu ou pas d'offload.
 * **Première session lente** : le backend compile le graphe pour le HTP à la création de la
   session (plusieurs secondes à quelques dizaines de secondes selon le SoC et la résolution).
   Le benchmark mesure `session init` et le log de tâche affiche la durée de construction du pool.
@@ -455,8 +456,15 @@ prend le relais.
 Diagnostic : le journal de l'app (boutons Copy/Share) contient les lignes `QNN: ...`. Pour les
 erreurs natives du backend, `adb logcat -s FlowFramesQnn onnxruntime`.
 
-* `QNN: HTP active (FP16); …` : la session est bien sur le NPU. Comparer avec le CPU via le
-  benchmark avant de conclure.
+Le log et le benchmark prouvent la **création de la session QNN**, pas l'affectation des nœuds :
+l'API Java d'ORT n'expose pas cette information (l'API native et les logs `onnxruntime` en
+verbosité élevée la détaillent, mais l'app ne les parse pas). Une session QNN peut donc encore
+exécuter une partie ou la totalité du graphe sur le CPU. C'est pourquoi la ligne du benchmark
+s'appelle « QNN HTP session » ; compare son `ms/inference` à celui des lignes non-QNN. Le rapport
+affiche aussi un ratio `QNN session vs best non-QNN` : proche de 1,00 = peu ou pas d'offload.
+
+* `QNN: HTP session created (FP16); …` : la session QNN a été créée. Cela ne prouve pas que des
+  nœuds ont tourné sur le NPU ; comparer le temps QNN au CPU.
 * `QNN: session creation failed (…)` : lire la cause. Le plus fréquent est un build sans QNN, un
   `-PqnnHtpArch` qui ne correspond pas au SoC, ou `No Snapdragon SOC detected` (SDK/arch).
 * `QNN: the HTP backend needs fixed height/width` : la résolution n'a pas été fixée ; ne devrait
